@@ -113,6 +113,8 @@ def _():
 
 @app.cell
 def _():
+    import os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     from pathlib import Path
 
     import matplotlib.pyplot as plt
@@ -122,7 +124,18 @@ def _():
 
     from cotescore.ocr import cdd_decomp, spacer_decomp
 
-    return Image, Path, cdd_decomp, np, pd, plt, spacer_decomp
+    return (
+        Image,
+        Path,
+        ThreadPoolExecutor,
+        as_completed,
+        cdd_decomp,
+        np,
+        os,
+        pd,
+        plt,
+        spacer_decomp,
+    )
 
 
 @app.cell(hide_code=True)
@@ -221,8 +234,12 @@ def _(mo):
 
 
 @app.cell
-def _(USE_GPU, np):
+def _(ThreadPoolExecutor, USE_GPU, np, os):
+    TESSERACT_WORKERS = min(os.cpu_count() or 4, 8)
+
     class EasyOCREngine:
+        """GPU engine. One crop at a time; the GPU is not the bottleneck here."""
+
         name = "easyocr"
 
         def __init__(self, gpu=USE_GPU):
@@ -233,17 +250,38 @@ def _(USE_GPU, np):
         def run(self, crop):
             return " ".join(self.reader.readtext(np.array(crop), detail=0))
 
+        def run_batch(self, crops):
+            return [self.run(c) for c in crops]
+
     class TesseractEngine:
+        """CPU engine, parallelised across crops.
+
+        Tesseract has no batch API: every call writes a temp file and spawns the
+        binary as a subprocess. Python releases the GIL while blocked on that
+        subprocess, so a *thread* pool really does run several Tesseract processes
+        at once — no need for multiprocessing. Because each call carries a fixed
+        ~50-100ms of file and process overhead, and a page can hold hundreds of
+        small regions, this overhead dominates the actual recognition work.
+        """
+
         name = "tesseract"
 
-        def __init__(self, psm=6):
+        def __init__(self, psm=6, workers=TESSERACT_WORKERS):
             import pytesseract
 
             self.pytesseract = pytesseract
             self.config = f"--psm {psm}"
+            self.workers = workers
 
         def run(self, crop):
             return self.pytesseract.image_to_string(crop, config=self.config)
+
+        def run_batch(self, crops):
+            if len(crops) < 2:
+                return [self.run(c) for c in crops]
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                # pool.map preserves input order, so crops stay paired with their rows.
+                return list(pool.map(self.run, crops))
 
     def build_engine(name):
         return {"easyocr": EasyOCREngine, "tesseract": TesseractEngine}[name]()
@@ -308,15 +346,17 @@ def _(CEV_DIR, Image, NCSE_IMAGES_DIR, Path, pd):
                 crops = crop_regions(
                     img, sub[["x", "y", "width", "height"]].to_numpy(float)
                 )
-            for (_, r), crop in zip(sub.iterrows(), crops):
+            # Batch the whole page in one call so the engine can parallelise it.
+            _idx = [i for i, c in enumerate(crops) if c is not None]
+            _texts = engine.run_batch([crops[i] for i in _idx])
+            page_text = [""] * len(crops)
+            for i, t in zip(_idx, _texts):
+                page_text[i] = t
+
+            for (_, r), text in zip(sub.iterrows(), page_text):
                 rows.append(
-                    {
-                        "filename": page,
-                        "region_idx": int(r.name),
-                        "ocr_text": "" if crop is None else engine.run(crop),
-                    }
+                    {"filename": page, "region_idx": int(r.name), "ocr_text": text}
                 )
-            print(f"  {tag}: {n}/{len(pages)} pages", end="\r")
 
         # columns= keeps the schema when a model produced no regions at all.
         out = pd.DataFrame(rows, columns=OCR_COLUMNS)
@@ -333,29 +373,45 @@ def _(CEV_DIR, Image, NCSE_IMAGES_DIR, Path, pd):
 def _(
     LAYOUT_MODELS,
     OCR_MODELS,
+    ThreadPoolExecutor,
+    as_completed,
     build_engine,
     gt_df,
     ocr_regions,
     pages,
     pred_df,
 ):
+    def run_engine(ocr_name):
+        """All three passes for one engine. Returns (gt_result, {layout: result})."""
+        print(f"  loading {ocr_name} ...")
+        engine = build_engine(ocr_name)
+
+        # S* — OCR of ground-truth regions (shared across layout models)
+        gt_result = ocr_regions(engine, gt_df, f"gt_{ocr_name}", pages)
+
+        # S — OCR of predicted regions, per layout model
+        pred_results = {
+            lm: ocr_regions(engine, pred_df[lm], f"{lm}_{ocr_name}", pages)
+            for lm in LAYOUT_MODELS
+        }
+        return gt_result, pred_results
+
+    # Run the engines concurrently. Tesseract is CPU-bound (subprocesses) and
+    # EasyOCR is GPU-bound, so they contend very little and the wall-clock is
+    # roughly the slower of the two rather than their sum. Each engine writes to
+    # its own cache files, so there is no collision.
     ocr_gt = {}  # S*  : ocr_model            -> DataFrame
     ocr_pred = {}  # S  : (layout, ocr_model) -> DataFrame
 
-    for _ocr_name in OCR_MODELS:
-        print(f"Loading {_ocr_name} ...")
-        _engine = build_engine(_ocr_name)
+    with ThreadPoolExecutor(max_workers=len(OCR_MODELS)) as _pool:
+        _futures = {_pool.submit(run_engine, _n): _n for _n in OCR_MODELS}
+        for _future in as_completed(_futures):
+            _name = _futures[_future]
+            _gt_res, _pred_res = _future.result()  # re-raises engine errors here
+            ocr_gt[_name] = _gt_res
+            for _lm, _res in _pred_res.items():
+                ocr_pred[(_lm, _name)] = _res
 
-        # S* — OCR of ground-truth regions (shared across layout models)
-        ocr_gt[_ocr_name] = ocr_regions(_engine, gt_df, f"gt_{_ocr_name}", pages)
-
-        # S — OCR of predicted regions, per layout model
-        for _lm in LAYOUT_MODELS:
-            ocr_pred[(_lm, _ocr_name)] = ocr_regions(
-                _engine, pred_df[_lm], f"{_lm}_{_ocr_name}", pages
-            )
-
-        del _engine
     print("OCR complete.")
     return ocr_gt, ocr_pred
 
