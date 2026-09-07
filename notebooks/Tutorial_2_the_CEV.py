@@ -80,7 +80,7 @@ def _(mo):
 
 
 @app.cell
-def _():
+def _(os):
     # --- Point these at your data (same as notebook 1) ----------------------------
     NCSE_IMAGES_DIR = "cotescore/data/ncsev2/images"
     NCSE_GT_CSV = "cotescore/data/ncsev2/ncse_testset_bboxes.csv"
@@ -99,6 +99,18 @@ def _():
     # size. Defaults to 1 in EasyOCR, which leaves the GPU badly under-fed.
     EASYOCR_BATCH_SIZE = 16
 
+    # Tesseract is built against OpenMP, so every process it spawns opens its own
+    # thread pool sized to the whole machine. Run N processes in parallel and you
+    # get N x cores threads fighting over N cores. Capping OpenMP to one thread
+    # per process makes the pool below the only source of parallelism.
+    # Measured on 80 region crops / 16 cores, output byte-identical throughout:
+    #     no pool, no cap  24.2s   |  pool, no cap  6.5s
+    #     no pool, cap     16.8s   |  pool + cap    2.2s
+    # Note the cap helps even with no pool: Tesseract's own OpenMP costs more
+    # than it gains on crops this small.
+    TESSERACT_WORKERS = max(1, (os.cpu_count() or 4) - 1)
+    TESSERACT_OMP_THREADS = 1
+
     # Triage thresholds (section 5)
     COTE_THRESHOLD = 0.5
     RATIO_THRESHOLD = 0.5
@@ -107,6 +119,8 @@ def _():
         COTE_THRESHOLD,
         EASYOCR_BATCH_SIZE,
         LAYOUT_MODELS,
+        TESSERACT_OMP_THREADS,
+        TESSERACT_WORKERS,
         NCSE_GT_CSV,
         NCSE_IMAGES_DIR,
         OCR_MODELS,
@@ -240,11 +254,15 @@ def _(mo):
 
 
 @app.cell
-def _(EASYOCR_BATCH_SIZE, ThreadPoolExecutor, USE_GPU, np, os):
-    # Leave one core free so the prefetch thread, the OS and the notebook itself
-    # are not competing with the Tesseract pool for the last core.
-    TESSERACT_WORKERS = max(1, (os.cpu_count() or 4) - 1)
-
+def _(
+    EASYOCR_BATCH_SIZE,
+    TESSERACT_OMP_THREADS,
+    TESSERACT_WORKERS,
+    ThreadPoolExecutor,
+    USE_GPU,
+    np,
+    os,
+):
     class EasyOCREngine:
         """GPU engine, one crop per call.
 
@@ -292,6 +310,14 @@ def _(EASYOCR_BATCH_SIZE, ThreadPoolExecutor, USE_GPU, np, os):
 
         def __init__(self, psm=6, workers=TESSERACT_WORKERS):
             import pytesseract
+
+            # Applied here rather than in the config cell on purpose. The variable
+            # is process-wide and inherited by every subprocess, so setting it up
+            # front would also cap torch's OpenMP — and torch reads that on init,
+            # which would throttle EasyOCR's CPU-side work. Setting it when the
+            # Tesseract engine is built means EasyOCR has already loaded.
+            # See the config cell for what the setting buys.
+            os.environ["OMP_THREAD_LIMIT"] = str(TESSERACT_OMP_THREADS)
 
             self.pytesseract = pytesseract
             self.config = f"--psm {psm}"
