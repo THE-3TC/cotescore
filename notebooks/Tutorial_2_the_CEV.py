@@ -95,12 +95,17 @@ def _():
     OCR_MODELS = ["easyocr", "tesseract"]
     USE_GPU = True
 
+    # EasyOCR recognises the text lines it finds inside a crop in batches of this
+    # size. Defaults to 1 in EasyOCR, which leaves the GPU badly under-fed.
+    EASYOCR_BATCH_SIZE = 16
+
     # Triage thresholds (section 5)
     COTE_THRESHOLD = 0.5
     RATIO_THRESHOLD = 0.5
     return (
         CEV_DIR,
         COTE_THRESHOLD,
+        EASYOCR_BATCH_SIZE,
         LAYOUT_MODELS,
         NCSE_GT_CSV,
         NCSE_IMAGES_DIR,
@@ -114,7 +119,8 @@ def _():
 @app.cell
 def _():
     import os
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import time
+    from concurrent.futures import ThreadPoolExecutor
     from pathlib import Path
 
     import matplotlib.pyplot as plt
@@ -128,13 +134,13 @@ def _():
         Image,
         Path,
         ThreadPoolExecutor,
-        as_completed,
         cdd_decomp,
         np,
         os,
         pd,
         plt,
         spacer_decomp,
+        time,
     )
 
 
@@ -234,21 +240,39 @@ def _(mo):
 
 
 @app.cell
-def _(ThreadPoolExecutor, USE_GPU, np, os):
-    TESSERACT_WORKERS = min(os.cpu_count() or 4, 8)
+def _(EASYOCR_BATCH_SIZE, ThreadPoolExecutor, USE_GPU, np, os):
+    # Leave one core free so the prefetch thread, the OS and the notebook itself
+    # are not competing with the Tesseract pool for the last core.
+    TESSERACT_WORKERS = max(1, (os.cpu_count() or 4) - 1)
 
     class EasyOCREngine:
-        """GPU engine. One crop at a time; the GPU is not the bottleneck here."""
+        """GPU engine, one crop per call.
+
+        EasyOCR detects text lines inside the crop and then recognises them.
+        ``batch_size`` controls how many of those lines go through the recogniser
+        at once; it defaults to 1, which is why GPU utilisation sits so low on
+        region crops that contain many lines. Raising it costs nothing in
+        accuracy — the same lines are recognised, just fewer round trips.
+
+        Batching across *crops* is deliberately not attempted: EasyOCR's
+        ``readtext_batched`` resizes every image to one shape, and these regions
+        range from tall narrow columns to wide headlines.
+        """
 
         name = "easyocr"
 
-        def __init__(self, gpu=USE_GPU):
+        def __init__(self, gpu=USE_GPU, batch_size=EASYOCR_BATCH_SIZE):
             import easyocr
 
             self.reader = easyocr.Reader(["en"], gpu=gpu)
+            self.batch_size = batch_size
 
         def run(self, crop):
-            return " ".join(self.reader.readtext(np.array(crop), detail=0))
+            return " ".join(
+                self.reader.readtext(
+                    np.array(crop), detail=0, batch_size=self.batch_size
+                )
+            )
 
         def run_batch(self, crops):
             return [self.run(c) for c in crops]
@@ -310,7 +334,7 @@ def _(mo):
 
 
 @app.cell
-def _(CEV_DIR, Image, NCSE_IMAGES_DIR, Path, pd):
+def _(CEV_DIR, Image, NCSE_IMAGES_DIR, Path, ThreadPoolExecutor, pd, time):
     def crop_regions(image, boxes):
         """Crop [x, y, width, height] boxes, clamped to the image. Degenerate boxes -> None."""
         W, H = image.size
@@ -336,32 +360,65 @@ def _(CEV_DIR, Image, NCSE_IMAGES_DIR, Path, pd):
             return cached.fillna({"ocr_text": ""})
 
         cache.parent.mkdir(parents=True, exist_ok=True)
-        rows = []
-        for n, page in enumerate(pages, 1):
+
+        def prepare_page(page):
+            """CPU work: decode the image and cut the crops. Runs on a prefetch thread."""
             sub = region_df[region_df["filename"] == page]
             if sub.empty:
-                continue
+                return None
             with Image.open(Path(NCSE_IMAGES_DIR) / page) as im:
                 img = im.convert("RGB")
                 crops = crop_regions(
                     img, sub[["x", "y", "width", "height"]].to_numpy(float)
                 )
-            # Batch the whole page in one call so the engine can parallelise it.
-            _idx = [i for i, c in enumerate(crops) if c is not None]
-            _texts = engine.run_batch([crops[i] for i in _idx])
-            page_text = [""] * len(crops)
-            for i, t in zip(_idx, _texts):
-                page_text[i] = t
+            return page, sub, crops
 
-            for (_, r), text in zip(sub.iterrows(), page_text):
-                rows.append(
-                    {"filename": page, "region_idx": int(r.name), "ocr_text": text}
+        rows = []
+        started = time.perf_counter()
+
+        # Prefetch: prepare page N+1 on a background thread while the engine works
+        # on page N, so image decoding and cropping do not stall inference.
+        # Mirrors the pattern in SpACER/scripts/run_all_ocr.py.
+        with ThreadPoolExecutor(max_workers=1) as prep:
+            pending = prep.submit(prepare_page, pages[0]) if pages else None
+            for i in range(len(pages)):
+                prepared = pending.result()
+                pending = (
+                    prep.submit(prepare_page, pages[i + 1])
+                    if i + 1 < len(pages)
+                    else None
                 )
+                if prepared is None:
+                    continue
+                # page travels with its own data, so it cannot drift from the index
+                page, sub, crops = prepared
+
+                # Hand the engine the whole page at once so it can parallelise.
+                _idx = [j for j, c in enumerate(crops) if c is not None]
+                _texts = engine.run_batch([crops[j] for j in _idx])
+                page_text = [""] * len(crops)
+                for j, t in zip(_idx, _texts):
+                    page_text[j] = t
+
+                for (_, r), text in zip(sub.iterrows(), page_text):
+                    rows.append(
+                        {"filename": page, "region_idx": int(r.name), "ocr_text": text}
+                    )
+
+                # flush=True matters: without it this buffers and you learn nothing
+                # until the pass ends. Tagged so the line is readable on its own.
+                print(
+                    f"  {tag}: {i + 1}/{len(pages)} pages, {len(rows)} regions, "
+                    f"{time.perf_counter() - started:.0f}s",
+                    flush=True,
+                )
+
+        elapsed = time.perf_counter() - started
 
         # columns= keeps the schema when a model produced no regions at all.
         out = pd.DataFrame(rows, columns=OCR_COLUMNS)
         out.to_csv(cache, index=False)
-        print(f"  {tag}: {len(out)} regions -> {cache}")
+        print(f"  {tag}: {len(out)} regions in {elapsed:.1f}s -> {cache}")
         if out.empty:
             print(f"  WARNING: {tag} produced no regions on these pages.")
         return out.fillna({"ocr_text": ""})
@@ -373,16 +430,16 @@ def _(CEV_DIR, Image, NCSE_IMAGES_DIR, Path, pd):
 def _(
     LAYOUT_MODELS,
     OCR_MODELS,
-    ThreadPoolExecutor,
-    as_completed,
     build_engine,
     gt_df,
     ocr_regions,
     pages,
     pred_df,
+    time,
 ):
     def run_engine(ocr_name):
-        """All three passes for one engine. Returns (gt_result, {layout: result})."""
+        """All three passes for one engine. Returns (gt_result, {layout: result}, seconds)."""
+        started = time.perf_counter()
         print(f"  loading {ocr_name} ...")
         engine = build_engine(ocr_name)
 
@@ -394,25 +451,35 @@ def _(
             lm: ocr_regions(engine, pred_df[lm], f"{lm}_{ocr_name}", pages)
             for lm in LAYOUT_MODELS
         }
-        return gt_result, pred_results
+        return gt_result, pred_results, time.perf_counter() - started
 
-    # Run the engines concurrently. Tesseract is CPU-bound (subprocesses) and
-    # EasyOCR is GPU-bound, so they contend very little and the wall-clock is
-    # roughly the slower of the two rather than their sum. Each engine writes to
-    # its own cache files, so there is no collision.
+    # Engines run one after another, deliberately.
+    #
+    # Running them concurrently sounds free — Tesseract is CPU-bound and EasyOCR
+    # looks GPU-bound — but EasyOCR does substantial CPU work too (CRAFT detection
+    # post-processing, box grouping, image normalisation). Both engines therefore
+    # compete for the same cores, and with a Tesseract pool already sized to the
+    # machine the result is heavy oversubscription: on a CPU-limited box both
+    # engines end up slower than running them in sequence. In series each engine
+    # gets the whole machine.
     ocr_gt = {}  # S*  : ocr_model            -> DataFrame
     ocr_pred = {}  # S  : (layout, ocr_model) -> DataFrame
 
-    with ThreadPoolExecutor(max_workers=len(OCR_MODELS)) as _pool:
-        _futures = {_pool.submit(run_engine, _n): _n for _n in OCR_MODELS}
-        for _future in as_completed(_futures):
-            _name = _futures[_future]
-            _gt_res, _pred_res = _future.result()  # re-raises engine errors here
-            ocr_gt[_name] = _gt_res
-            for _lm, _res in _pred_res.items():
-                ocr_pred[(_lm, _name)] = _res
+    _timings = {}
+    _wall = time.perf_counter()
+    for _ocr_name in OCR_MODELS:
+        _gt_res, _pred_res, _secs = run_engine(_ocr_name)
+        ocr_gt[_ocr_name] = _gt_res
+        for _lm, _res in _pred_res.items():
+            ocr_pred[(_lm, _ocr_name)] = _res
+        _timings[_ocr_name] = _secs
+    _wall = time.perf_counter() - _wall
 
-    print("OCR complete.")
+    # Slowest engine is the one worth optimising further.
+    print("\nOCR complete.")
+    for _n, _s in sorted(_timings.items(), key=lambda kv: -kv[1]):
+        print(f"  {_n:12s} {_s:7.1f}s")
+    print(f"  {'total':12s} {_wall:7.1f}s")
     return ocr_gt, ocr_pred
 
 
