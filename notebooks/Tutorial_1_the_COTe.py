@@ -84,8 +84,8 @@ def _(mo):
 @app.cell
 def _():
     # --- Point these at your data -------------------------------------------------
-    NCSE_IMAGES_DIR = "/teamspace/studios/this_studio/ncse/images"
-    NCSE_GT_CSV = "/teamspace/studios/this_studio/ncse/ncse_testset_bboxes.csv"
+    NCSE_IMAGES_DIR = "cotescore/data/ncsev2/images"
+    NCSE_GT_CSV = "cotescore/data/ncsev2/ncse_testset_bboxes.csv"
 
     # --- Where results are written ------------------------------------------------
     PRED_DIR = "outputs/predictions"
