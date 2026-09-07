@@ -17,7 +17,7 @@ def _(mo):
         r"""
     # The CEV on NCSE: is OCR or parsing the bottleneck?
 
-    This is the second of two notebooks. It assumes you have run **`ncse_cote_tutorial.py`**,
+    This is the second of two notebooks. It assumes you have run **`Tutorial_1_the_COTe.py`**,
     which wrote layout predictions and per-page COTe scores to `outputs/predictions/`.
 
     ## The problem
@@ -710,6 +710,29 @@ def _(mo):
     - `ocr_*.csv` — cached transcriptions, one file per OCR pass.
     - `ncse_cev_scores.csv` — per page × layout model × OCR engine CEV components.
     - `ncse_triage.csv` — the above plus COTe, the ratio, and the verdict.
+    """
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    ---
+
+    ## The papers
+
+    The CEV, SpACER and CDD are described in full here, including the threshold sweep the
+    0.5 / 0.5 triage rule comes from:
+
+    - **CEV** — Bourne, Simbeye and Nockels, *The Character Error Vector: Decomposable errors
+      for page-level OCR evaluation*. [https://arxiv.org/abs/2604.06160](https://arxiv.org/abs/2604.06160)
+
+    The layout metric used in Tutorial 1:
+
+    - **COTe** — Bourne, Simbeye and Govia, *The COTe Score: A Decomposable Framework for
+      Evaluating Document Layout Analysis Models*. [https://arxiv.org/abs/2603.12718](https://arxiv.org/abs/2603.12718)
     """
     )
     return

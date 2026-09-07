@@ -182,10 +182,10 @@ Two notebooks evaluate a complete two-stage document pipeline — layout parsing
 the NCSE newspaper test set. Run them in order; the first writes the predictions the second
 reads.
 
-1. [`notebooks/ncse_cote_tutorial.py`](notebooks/ncse_cote_tutorial.py) — scores two layout
+1. [`notebooks/Tutorial_1_the_COTe.py`](notebooks/Tutorial_1_the_COTe.py) — scores two layout
    models (DocLayout-YOLO and Docling Heron) with COTe, compares it against F1 and mean IoU,
    and writes a folder of COTe pixel-state diagnostics per model.
-2. [`notebooks/ncse_cev_tutorial.py`](notebooks/ncse_cev_tutorial.py) — runs EasyOCR and
+2. [`notebooks/Tutorial_2_the_CEV.py`](notebooks/Tutorial_2_the_CEV.py) — runs EasyOCR and
    Tesseract over both models' regions and scores them with the CEV (SpACER and CDD), then uses
    COTe together with `d_ocr / d_total` to attribute each page's error to parsing or to OCR.
 
@@ -194,8 +194,8 @@ so they can be pointed at your own dataset. The layout models need a GPU and the
 `doclayout-yolo`, `easyocr` and `pytesseract` packages (plus the `tesseract` binary).
 
 ```bash
-marimo edit notebooks/ncse_cote_tutorial.py
-marimo edit notebooks/ncse_cev_tutorial.py
+marimo edit notebooks/Tutorial_1_the_COTe.py
+marimo edit notebooks/Tutorial_2_the_CEV.py
 ```
 
 ## Optional extras — running the benchmark models

@@ -18,7 +18,7 @@ def _(mo):
     # COTe on NCSE: a worked example
 
     This is the first of two notebooks. Here we evaluate **document layout parsing** with the
-    **COTe** score. The second notebook (`ncse_cev_tutorial.py`) picks up the predictions saved
+    **COTe** score. The second notebook (`Tutorial_2_the_CEV.py`) picks up the predictions saved
     here and evaluates the **OCR** stage with the CEV.
 
     COTe decomposes layout quality into four quantities, each defined over the pixels of a
@@ -735,9 +735,31 @@ def _(mo):
     COTe has told us how well each model recovered parsed the page. It says nothing
     about the quality of the text extraction. 
  
-    Continue to **`ncse_cev_tutorial.py`**, which loads these predictions, runs two OCR engines,
+    Continue to **`Tutorial_2_the_CEV.py`**, which loads these predictions, runs two OCR engines,
     and uses COTe together with SpACER to attribute the main source of error to either the 
     parsing model or the OCR engine.
+    """
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    ---
+
+    ## The papers
+
+    COTe and the SSU framework are described in full here:
+
+    - **COTe** — Bourne, Simbeye and Govia, *The COTe Score: A Decomposable Framework for
+      Evaluating Document Layout Analysis Models*. [https://arxiv.org/abs/2603.12718](https://arxiv.org/abs/2603.12718)
+
+    The companion metric for the OCR stage, used in Tutorial 2:
+
+    - **CEV** — Bourne, Simbeye and Nockels, *The Character Error Vector: Decomposable errors
+      for page-level OCR evaluation*. [https://arxiv.org/abs/2604.06160](https://arxiv.org/abs/2604.06160)
     """
     )
     return
