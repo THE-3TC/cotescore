@@ -72,7 +72,7 @@ def _(mo):
     If it also carries `image_width`, coordinates are rescaled automatically when the CSV was
     recorded at a different resolution than the images on disk.
 
-    Try the example using the defaul "**ncse_testset_bboxes.csv**" file which has SSU's, then
+    Try the example using the default "**ncse_testset_bboxes.csv**" file which has SSU's, then
     try again using the "**ncse_testset_bboxes_nossu.csv**" where each region is it's own 
     bounding box. It is worth considering if there are differences why they are there, whether
     this is always the case, and what the implications are for your own data.
@@ -212,7 +212,7 @@ def _(mo):
 
     Below, one page's ground-truth boxes are coloured **by `ssu_id`**. Boxes sharing a colour
     belong to the same semantic unit, typically one article running across several columns.
-    This distinguishes the COTe from th tradition IoU/F1 approaches which are purely spatial,
+    This distinguishes the COTe from the traditional IoU/F1 approaches which are purely spatial,
     and do not include semantic information.
     """
     )
@@ -275,7 +275,7 @@ def _(mo):
     - **Mask path** — a 2-D `gt_ssu_map` of SSU ids plus a list of prediction masks. Needed for
       segmentation models and for `compute_cote_masks`. see section 5.
 
-    All the loaders in `cotescore.dataset`, return the same annotation structure.:
+    All the loaders in `cotescore.dataset` return the same annotation structure:
 
     ```python
     {"x", "y", "width", "height", "class", "ssu_id", "ssu_class", "confidence", "page_id"}
@@ -284,7 +284,7 @@ def _(mo):
     with each sample being `{"image_path", "annotations", "filename"}`. Adding a new dataset
     requires just creating a loader that emits those dicts. The `ssu_id` is the only 
     genuinely dataset-specific work although this can be automated if your data has a 
-    hierarchical structure, or ignored and each region provided it's own SSU id (try the no ssu example).
+    hierarchical structure, or ignored and each region provided its own SSU id (try the no ssu example).
 
     Three things fail silently if you get them wrong:
 
@@ -293,7 +293,7 @@ def _(mo):
        rescaling because its CSV was recorded at a different resolution than the PNGs; the
        loader does this automatically when the CSV carries `image_width`.
     3. **Overlapping ground-truth boxes resolve first-write-wins**, and `GTBoxes` breaks ties by
-       array order to match, so the order of your groundtruthboxes is meaningful.
+       array order to match, so the order of your ground-truth boxes is meaningful.
 
     """
     )
