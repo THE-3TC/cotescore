@@ -7,7 +7,7 @@ Trespass, and Excess metrics.
 
 __version__ = "0.1.0"
 
-from .layout import cote_score, coverage, overlap, iou, mean_iou
+from .layout import cote_score, coverage, overlap, trespass, excess, iou, mean_iou
 from .ocr import (
     shannon_entropy,
     jensen_shannon_divergence,
@@ -54,6 +54,8 @@ __all__ = [
     "cote_score",
     "coverage",
     "overlap",
+    "trespass",
+    "excess",
     "iou",
     "mean_iou",
     "shannon_entropy",
