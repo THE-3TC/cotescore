@@ -82,8 +82,8 @@ def _(mo):
 @app.cell
 def _():
     # --- Point these at your data (same as notebook 1) ----------------------------
-    NCSE_IMAGES_DIR = "/teamspace/studios/this_studio/ncse/images"
-    NCSE_GT_CSV = "/teamspace/studios/this_studio/ncse/ncse_testset_bboxes.csv"
+    NCSE_IMAGES_DIR = "cotescore/data/ncsev2/images"
+    NCSE_GT_CSV = "cotescore/data/ncsev2/ncse_testset_bboxes.csv"
 
     # --- Written by notebook 1 ----------------------------------------------------
     PRED_DIR = "outputs/predictions"
@@ -729,10 +729,6 @@ def _(mo):
     - **CEV** — Bourne, Simbeye and Nockels, *The Character Error Vector: Decomposable errors
       for page-level OCR evaluation*. [https://arxiv.org/abs/2604.06160](https://arxiv.org/abs/2604.06160)
 
-    The layout metric used in Tutorial 1:
-
-    - **COTe** — Bourne, Simbeye and Govia, *The COTe Score: A Decomposable Framework for
-      Evaluating Document Layout Analysis Models*. [https://arxiv.org/abs/2603.12718](https://arxiv.org/abs/2603.12718)
     """
     )
     return
