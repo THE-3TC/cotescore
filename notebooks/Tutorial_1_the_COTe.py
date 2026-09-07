@@ -48,8 +48,7 @@ def _(mo):
     can find every column perfectly and still score badly under F1 simply for disagreeing about
     granularity.
 
-    COTe scores the pixels, not the box count, so it is indifferent to how a correct region is
-    subdivided. We compute F1 and mean IoU alongside COTe so you can watch them disagree.
+    COTe scores the pixel coverage of the SSUs, making it robust to granularity differences.
 
     By the end of this notebook you will have, for **two** layout models, a per-page score table,
     a dataset-level summary, and a folder of colour-coded diagnostic images showing exactly where
@@ -66,11 +65,17 @@ def _(mo):
     ## Configuration
 
     Everything the notebook needs is a folder of page images and a ground-truth CSV. Both are
-    plain strings — point them at your own data to reuse this notebook.
+    plain strings — point them at your own data to reuse this notebook. Note your GT may be in
+    a different format to the NCSE example and may need converting to a COTe-compatible format.
 
     The ground-truth CSV needs the columns `filename, x1, y1, x2, y2, class, ssu_id, ssu_class`.
     If it also carries `image_width`, coordinates are rescaled automatically when the CSV was
     recorded at a different resolution than the images on disk.
+
+    Try the example using the defaul "**ncse_testset_bboxes.csv**" file which has SSU's, then
+    try again using the "**ncse_testset_bboxes_nossu.csv**" where each region is it's own 
+    bounding box. It is worth considering if there are differences why they are there, whether
+    this is always the case, and what the implications are for your own data.
     """
     )
     return
@@ -206,9 +211,9 @@ def _(mo):
     ### What an SSU looks like
 
     Below, one page's ground-truth boxes are coloured **by `ssu_id`**. Boxes sharing a colour
-    belong to the same semantic unit — typically one article running across several columns.
-    This grouping is the whole point: COTe asks whether a prediction respects these units, not
-    whether it reproduced the box count.
+    belong to the same semantic unit, typically one article running across several columns.
+    This distinguishes the COTe from th tradition IoU/F1 approaches which are purely spatial,
+    and do not include semantic information.
     """
     )
     return
@@ -249,6 +254,49 @@ def _(Image, dataset, plt):
     )
     _ax.axis("off")
     _fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(
+        r"""
+    ### Using your own data
+
+    COTe needs only two things: **ground-truth boxes in XYWH, each carrying an integer
+    `ssu_id`**, and the **image extent**. The extent is required because *excess* divides by
+    total background area.
+
+    There are two ways to supply them:
+
+    - **Bounding-box fast path** — `GTBoxes(boxes, ssu_ids, image_width, image_height)` with
+      predictions as an `(M, 4)` array. Computed analytically, nothing is rasterised. This is
+      is used in this tutorial.
+    - **Mask path** — a 2-D `gt_ssu_map` of SSU ids plus a list of prediction masks. Needed for
+      segmentation models and for `compute_cote_masks`. see section 5.
+
+    All the loaders in `cotescore.dataset`, return the same annotation structure.:
+
+    ```python
+    {"x", "y", "width", "height", "class", "ssu_id", "ssu_class", "confidence", "page_id"}
+    ```
+
+    with each sample being `{"image_path", "annotations", "filename"}`. Adding a new dataset
+    requires just creating a loader that emits those dicts. The `ssu_id` is the only 
+    genuinely dataset-specific work although this can be automated if your data has a 
+    hierarchical structure, or ignored and each region provided it's own SSU id (try the no ssu example).
+
+    Three things fail silently if you get them wrong:
+
+    1. **`0` is reserved for background**, so SSU ids must start at 1.
+    2. **Box coordinates must be in the same frame as the extent you pass.** NCSE needs
+       rescaling because its CSV was recorded at a different resolution than the PNGs; the
+       loader does this automatically when the CSV carries `image_width`.
+    3. **Overlapping ground-truth boxes resolve first-write-wins**, and `GTBoxes` breaks ties by
+       array order to match, so the order of your groundtruthboxes is meaningful.
+
+    """
+    )
     return
 
 
@@ -333,9 +381,6 @@ def _(mo):
     `f1` and `mean_iou` take the annotation dicts directly and give us the instance-matching
     comparison.
 
-    For production benchmarking, `benchmarks.runner.BenchmarkRunner.run_evaluation` does all of
-    this with GPU/CPU pipelining and adds mAP. We write the loop out here because the loop is the
-    thing being taught.
     """
     )
     return
@@ -470,9 +515,10 @@ def _(mo):
 
     One row per model, averaged over pages.
 
-    Read the row left to right. **coverage** near 1 means the model found the text. **overlap**
-    is redundancy — the same SSU pixels claimed twice. **trespass** is the boundary error that
-    punishes merging separate articles. **excess** is prediction spilling onto background.
+    Read the row left to right. **Coverage** near 1 means the model covers all semantic elements.
+    **Overlap** is when multiple predictions cover the same region. **Trespass** is the boundary 
+    error that punishes merging separate articles. **Excess** is prediction spilling onto 
+    background.
 
     Then compare `cote` against `f1_50` and `mean_iou`. Where a model splits SSUs into columns —
     correct pixels, wrong box count — COTe stays high while F1 falls.
@@ -498,34 +544,6 @@ def _(all_scores):
     return (summary,)
 
 
-@app.cell
-def _(summary):
-    # Direction of "better" per metric. Columns absent from both sets are descriptive
-    # (e.g. box counts) and are never bolded — there is no better or worse box count.
-    _higher_better = {"cote", "coverage", "mean_iou", "f1_50"}
-    _lower_better = {"overlap", "trespass", "excess"}
-
-    def df_to_markdown(df, caption):
-        """Markdown table with the best value per scored column in bold."""
-        lines = [f"**{caption}**", "", "| model | " + " | ".join(df.columns) + " |"]
-        lines.append("|" + "---|" * (len(df.columns) + 1))
-        best = {}
-        for c in df.columns:
-            if c in _higher_better:
-                best[c] = df[c].max()
-            elif c in _lower_better:
-                best[c] = df[c].min()
-        for name, row in df.iterrows():
-            cells = [
-                f"**{row[c]:.4f}**" if c in best and row[c] == best[c] else f"{row[c]:.4f}"
-                for c in df.columns
-            ]
-            lines.append(f"| {name} | " + " | ".join(cells) + " |")
-        return "\n".join(lines)
-
-    print(df_to_markdown(summary, "COTe on the NCSE test set"))
-    return (df_to_markdown,)
-
 
 @app.cell(hide_code=True)
 def _(mo):
@@ -533,8 +551,14 @@ def _(mo):
         r"""
     ### COTe against F1, page by page
 
-    Each point is a page. When the cloud sits above the diagonal, COTe is rewarding pixel-correct
-    parsing that F1 penalises purely for disagreeing about how regions are subdivided.
+    The figure below shows a scatter plot of the performance of the Heron and Yolo models
+    across the NCSE test set. Each point represents a single page, with the x-axis showing 
+    the F1 score at IoU 0.5 and the y-axis showing the COTe score. The dashed line represents
+    the line of equality (y = x). Points above the line indicate that COTe is rewarding
+    the model more highly than the F1 score, this will mostly due to granularity differences 
+    between the ground truth and the model predictions. Points below the line indicate that
+    the COTe score is penalising the model for Overlap and Trespass errors, which are
+    beyond the scope of the F1 score.
     """
     )
     return
@@ -560,9 +584,10 @@ def _(mo):
         r"""
     ## 5. Visualise where the pixels went
 
-    A score tells you *how much* was wrong; the pixel-state map tells you *what* was wrong.
-    `compute_cote_masks` returns one mutually exclusive binary mask per state, so the colours
-    partition the page:
+    While the COTe score provides a quantiative meaasure of layout quality, it can still
+    be useful to visualise the errors as they appear on the page.
+    This code block produce an image showing the predictions across each image in the dataset,
+    this can be valuable for detailed model debugging. The colour maps is described below
 
     | colour | state | meaning |
     |---|---|---|
@@ -668,9 +693,8 @@ def _(mo):
         r"""
     ### Inspect a single page side by side
 
-    The same page under both models. Differences in the colour mix are the differences in parsing
-    behaviour: more red means more boundary-crossing merges, more grey means missed text, more
-    amber means the model predicted the same region twice.
+    The same page under both models. When viewing the images it is worth considering how
+    the different combinations of error impact your own interpretation of "good" and "bad".
     """
     )
     return
