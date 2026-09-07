@@ -732,13 +732,12 @@ def _(mo):
 
     ---
 
-    COTe has told us how well each model recovered the *geometry* of the page. It says nothing
-    about whether the text inside those regions was read correctly. That is the CEV's job, and
-    the two interact: bad parsing sends bad crops to the OCR engine, so a poor final transcription
-    does not by itself tell you which stage to fix.
-
+    COTe has told us how well each model recovered parsed the page. It says nothing
+    about the quality of the text extraction. 
+ 
     Continue to **`ncse_cev_tutorial.py`**, which loads these predictions, runs two OCR engines,
-    and uses COTe together with SpACER to attribute the error.
+    and uses COTe together with SpACER to attribute the main source of error to either the 
+    parsing model or the OCR engine.
     """
     )
     return
