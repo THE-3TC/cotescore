@@ -1,4 +1,8 @@
-# cotescore
+<p align="center">
+  <img src="https://raw.githubusercontent.com/JonnoB/cotescore/main/docs/cotescore_banner.png"
+       alt="cotescore" width="700">
+</p>
+
 
 **Decomposable evaluation metrics for document understanding pipelines — the COTe score for layout parsing, and the Character Error Vector for page-level OCR**
 

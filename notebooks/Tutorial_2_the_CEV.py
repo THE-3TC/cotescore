@@ -672,37 +672,31 @@ def _(mo):
         r"""
     ## 5. Which stage is the bottleneck?
 
-    Now combine the two notebooks. We have, per page:
+    We can infer the main source of error without character-level ground truth, 
+    By combining the COTe and SpACER.
 
-    - **COTe** — how good the geometry is (notebook 1).
-    - **$d_{ocr} / d_{total}$** — what share of the pipeline's total error was already present
+    - **COTe**: How good the page parsing  (notebook 1).
+    - **$d_{ocr} / d_{total}$**: What share of the pipeline's total error was already present
       when OCR ran on *perfect* regions.
 
-    Neither term needs character-level ground truth, which is the whole point: this diagnosis is
-    available on datasets like NCSE where the full CEV is not.
 
     ```python
     ocr_is_bottleneck = (cote > 0.5) & (d_ocr / d_total > 0.5)
     ```
 
-    Reading the two terms:
+    Understanding the two terms:
 
-    - **High COTe** — the regions are geometrically sound, so we can trust that the OCR engine
-      was given a fair chance.
-    - **High ratio** — most of the error survives even with perfect regions, so it is the
-      transcription engine at fault.
+    - **High COTe**: Regions are broadly correctly parsed, meaning the amount of error directly
+    introduced by missing or overlapping regions is relatively low.
+    - **High ratio** : There is high OCR on perfectly parsed data error relative 
+    to the total pipleline, indicating OCR is the main source of error.
 
-    Fail either test and the finger points at parsing: either the geometry is visibly wrong, or
-    the pipeline error is much larger than what OCR alone produces, meaning the region carve-up
-    introduced it.
+    
+    As such if either of the two tests fail then the parsing stage is the main source of error. 
+    If both tests pass then the OCR stage is the main source of error. In the CEV paper 
+    (see bottom of notebook 1) we found that the thresholds of 0.5 for both test cases produced
+    an F1 of 0.91.
 
-    A caveat worth stating plainly. **We cannot validate this rule on NCSE.** Validation means
-    checking the prediction against the true label $d_{ocr} \geq d_{pars}$, and $d_{pars}$ is
-    exactly the term the missing character positions deny us. The 0.5/0.5 defaults come from a
-    threshold sweep on the Spiritualist dataset, where character boxes make the ground-truth
-    label computable — see `cote_conditioned_validation.py` and the F1 heatmap in
-    `spiritualist_decomposition.py` in the SpACER repository. Here we are *applying* a
-    pre-validated rule, not establishing one.
     """
     )
     return
