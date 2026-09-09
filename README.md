@@ -18,6 +18,8 @@ Document understanding pipelines generally have two stages. The first stage pars
 
 The **cotescore** library provides two decomposable metrics one for each stage of the pipeline.  
 
+For a conceptual introduction to these metrics there is, a blog post on the [COTe score](https://the-3tc.github.io/blog/cote-score/), a blog post on the [CEV](https://the-3tc.github.io/blog/cev-score/), and two [tutorials](https://lightning.ai/the3tc/templates/cotescore-library-tutorial) available to run for free on a lightning ai studio.
+
 ### Layout parsing — the COTe score
 
 
@@ -182,9 +184,7 @@ marimo edit notebooks/limerick_analysis.py
 
 ### End-to-end walkthrough on a real dataset
 
-Two notebooks evaluate a complete two-stage document pipeline — layout parsing, then OCR — on
-the NCSE newspaper test set. Run them in order; the first writes the predictions the second
-reads.
+There are two tutorial notebooks, covering COTe and CEV that provide hands on experience of the metrics. The tutorials use the `marimo` library, the NCSEv2 test set and require a GPU. A 1-click reproducible lightning.ai studio is available to run for free [here](https://lightning.ai/the3tc/templates/cotescore-library-tutorial)
 
 1. [`notebooks/Tutorial_1_the_COTe.py`](notebooks/Tutorial_1_the_COTe.py) — scores two layout
    models (DocLayout-YOLO and Docling Heron) with COTe, compares it against F1 and mean IoU,
