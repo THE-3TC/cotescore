@@ -53,7 +53,8 @@ def _(mo):
     - $d_{pars}$ is the error the parser introduces on its own.
 
     Two instantiations share this structure: **SpACER**, a count-based metric analogous to CER
-    ($(D + \hat{E}) / 2C$), and **CDD**, a distribution-based metric using the square root of the
+    ($(\hat{E} + D + I) / 2C$, where $\hat{E}$ is the L1 count difference and $D$, $I$ are the net
+    deletions and insertions), and **CDD**, a distribution-based metric using the square root of the
     Jensen–Shannon divergence, bounded in $[0, 1]$.
 
     ## What NCSE can and cannot give us

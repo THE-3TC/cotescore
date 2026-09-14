@@ -101,30 +101,44 @@ class TestJSDDistance:
 class TestSpACERCounts:
     def test_perfect_match_single_box(self):
         c = Counter({"a": 3, "b": 2})
-        E_hat, C, D_macro, D_micro = _spacer_counts([c], [c])
-        assert E_hat == pytest.approx(0.0)
-        assert C == pytest.approx(5.0)
-        assert D_macro == pytest.approx(0.0)
-        assert D_micro == pytest.approx(0.0)
+        k = _spacer_counts([c], [c])
+        assert k.E_hat == pytest.approx(0.0)
+        assert k.C == pytest.approx(5.0)
+        assert k.D_macro == pytest.approx(0.0)
+        assert k.I_macro == pytest.approx(0.0)
+        assert k.D_micro == pytest.approx(0.0)
+        assert k.I_micro == pytest.approx(0.0)
 
     def test_deletion_only(self):
         ref = Counter({"a": 4})
         pred = Counter({"a": 2})
-        E_hat, C, D_macro, D_micro = _spacer_counts([ref], [pred])
+        k = _spacer_counts([ref], [pred])
         # |4 - 2| = 2
-        assert E_hat == pytest.approx(2.0)
-        assert C == pytest.approx(4.0)
-        assert D_macro == pytest.approx(2.0)
-        assert D_micro == pytest.approx(2.0)
+        assert k.E_hat == pytest.approx(2.0)
+        assert k.C == pytest.approx(4.0)
+        assert k.D_macro == pytest.approx(2.0)
+        assert k.I_macro == pytest.approx(0.0)
+        assert k.D_micro == pytest.approx(2.0)
+        assert k.I_micro == pytest.approx(0.0)
 
     def test_insertion_only(self):
         ref = Counter({"a": 2})
         pred = Counter({"a": 4})
-        E_hat, C, D_macro, D_micro = _spacer_counts([ref], [pred])
-        assert E_hat == pytest.approx(2.0)
-        assert C == pytest.approx(2.0)
-        assert D_macro == pytest.approx(0.0)   # no net deletion at page level
-        assert D_micro == pytest.approx(0.0)   # no per-box deletion either
+        k = _spacer_counts([ref], [pred])
+        assert k.E_hat == pytest.approx(2.0)
+        assert k.C == pytest.approx(2.0)
+        assert k.D_macro == pytest.approx(0.0)   # no net deletion at page level
+        assert k.I_macro == pytest.approx(2.0)   # two net insertions
+        assert k.D_micro == pytest.approx(0.0)
+        assert k.I_micro == pytest.approx(2.0)
+
+    def test_substitution_only(self):
+        # Same length, different tokens: counted entirely by E_hat.
+        ref = Counter({"a": 4})
+        pred = Counter({"a": 2, "b": 2})
+        k = _spacer_counts([ref], [pred])
+        assert k.E_hat == pytest.approx(4.0)
+        assert k.D_macro == k.I_macro == k.D_micro == k.I_micro == pytest.approx(0.0)
 
     def test_micro_vs_macro_differ(self):
         # Box 0: ref=3, pred=1 → deletion of 2
@@ -133,12 +147,30 @@ class TestSpACERCounts:
         pred0 = Counter({"a": 1})
         ref1 = Counter({"a": 1})
         pred1 = Counter({"a": 3})
-        E_hat, C, D_macro, D_micro = _spacer_counts([ref0, ref1], [pred0, pred1])
-        # Aggregate: ref=4, pred=4 → D_macro = 0
-        assert D_macro == pytest.approx(0.0)
-        # Per box: box0 del=2, box1 del=0 → D_micro = 2
-        assert D_micro == pytest.approx(2.0)
-        assert C == pytest.approx(4.0)
+        k = _spacer_counts([ref0, ref1], [pred0, pred1])
+        # Aggregate: ref=4, pred=4 → no net change at page level
+        assert k.D_macro == pytest.approx(0.0)
+        assert k.I_macro == pytest.approx(0.0)
+        # Per box: box0 del=2, box1 ins=2
+        assert k.D_micro == pytest.approx(2.0)
+        assert k.I_micro == pytest.approx(2.0)
+        assert k.C == pytest.approx(4.0)
+
+    def test_macro_d_plus_i_equals_abs_length_difference(self):
+        ref = Counter({"a": 5, "b": 1})
+        for pred in (Counter({"a": 2}), Counter({"a": 9, "c": 1}), Counter({"b": 6})):
+            k = _spacer_counts([ref], [pred])
+            assert k.D_macro + k.I_macro == pytest.approx(
+                abs(sum(ref.values()) - sum(pred.values()))
+            )
+            # Exactly one side is non-zero (or both zero).
+            assert min(k.D_macro, k.I_macro) == pytest.approx(0.0)
+
+    def test_micro_d_plus_i_equals_sum_abs_box_differences(self):
+        refs = [Counter({"a": 3}), Counter({"a": 1}), Counter({"b": 2})]
+        preds = [Counter({"a": 1}), Counter({"a": 4}), Counter({"b": 2})]
+        k = _spacer_counts(refs, preds)
+        assert k.D_micro + k.I_micro == pytest.approx(2 + 3 + 0)
 
 
 # =============================================================================
@@ -162,14 +194,31 @@ class TestSpacer:
         assert spacer(Counter(), Counter({"a": 3})) == pytest.approx(0.0)
 
     def test_can_exceed_one(self):
-        # Completely wrong characters: E_hat = C (all chars differ)
-        # D_macro = C (all deleted from ref perspective if pred uses wrong chars)
-        # Actually: ref=Counter(a:2), pred=Counter(b:4)
-        # E_hat = |2-0| + |0-4| = 6, C=2, D_macro=max(0,2-4)=0
-        # SpACER = (0+6)/(2*2) = 1.5
+        # ref=Counter(a:2), pred=Counter(b:4)
+        # E_hat = |2-0| + |0-4| = 6, D_macro = 0, I_macro = 2, C = 2
+        # SpACER = (6+0+2)/(2*2) = 2.0
         ref = Counter({"a": 2})
         pred = Counter({"b": 4})
-        assert spacer(ref, pred) > 1.0
+        assert spacer(ref, pred) == pytest.approx(2.0)
+
+    def test_insertion_known_value(self):
+        # ref="aa" (C=2), pred="aaaa" (2 insertions)
+        # E_hat=2, I_macro=2 → (2+0+2)/(2*2) = 1.0
+        ref = Counter({"a": 2})
+        pred = Counter({"a": 4})
+        assert spacer(ref, pred) == pytest.approx(1.0)
+
+    def test_edit_types_weighted_equally(self):
+        # Mirrors CER: k deletions, k insertions and k substitutions each
+        # cost k / C.
+        ref = Counter({"a": 10})
+        k = 2
+        deletion = spacer(ref, Counter({"a": 10 - k}))
+        insertion = spacer(ref, Counter({"a": 10 + k}))
+        substitution = spacer(ref, Counter({"a": 10 - k, "b": k}))
+        assert deletion == pytest.approx(k / 10)
+        assert insertion == pytest.approx(k / 10)
+        assert substitution == pytest.approx(k / 10)
 
 
 # =============================================================================
@@ -191,6 +240,19 @@ class TestSpacerMicro:
         macro_val = spacer(ref0 + ref1, pred0 + pred1)
         micro_val = spacer_micro([ref0, ref1], [pred0, pred1])
         assert micro_val > macro_val
+        # Aggregate counts are identical so E_hat = 0 and macro = 0; micro
+        # picks up both the box-0 deletion and the box-1 insertion.
+        assert macro_val == pytest.approx(0.0)
+        assert micro_val == pytest.approx((0 + 2 + 2) / (2 * 4))
+
+    def test_micro_insertion_not_masked_by_deletion(self):
+        # Symmetric to the cancellation case above: insertion in box 0,
+        # deletion in box 1. Must score the same as the mirror image.
+        a = spacer_micro([Counter({"a": 3}), Counter({"a": 1})],
+                         [Counter({"a": 1}), Counter({"a": 3})])
+        b = spacer_micro([Counter({"a": 1}), Counter({"a": 3})],
+                         [Counter({"a": 3}), Counter({"a": 1})])
+        assert a == pytest.approx(b)
 
 
 # =============================================================================
@@ -328,18 +390,24 @@ class TestSpACERDecomp:
         # Box 1: gt=a,   total=aaa (insertion 2, masks macro)
         d = spacer_decomp({"gt": ["aaa", "a"], "total": ["a", "aaa"]})
         assert d.d_total_macro == pytest.approx(0.0, abs=1e-9)
-        assert d.d_total_micro is not None
-        assert d.d_total_micro > 0.0
+        # E_hat=0, D_micro=2, I_micro=2, C=4 → 4/8
+        assert d.d_total_micro == pytest.approx(0.5)
 
     def test_word_mode(self):
         d = spacer_decomp({"gt": "hello world", "total": "hello world"}, mode="word")
         assert d.d_total_macro == pytest.approx(0.0)
 
     def test_known_value_total_macro(self):
-        # gt="aaaa" (C=4), total="aa" → E_hat=2, D_macro=2
-        # SpACER = (2+2)/(2*4) = 0.5
+        # gt="aaaa" (C=4), total="aa" → E_hat=2, D_macro=2, I_macro=0
+        # SpACER = (2+2+0)/(2*4) = 0.5
         d = spacer_decomp({"gt": "aaaa", "total": "aa"})
         assert d.d_total_macro == pytest.approx(0.5)
+
+    def test_known_value_total_macro_insertion(self):
+        # gt="aa" (C=2), total="aaaa" → E_hat=2, D_macro=0, I_macro=2
+        # SpACER = (2+0+2)/(2*2) = 1.0
+        d = spacer_decomp({"gt": "aa", "total": "aaaa"})
+        assert d.d_total_macro == pytest.approx(1.0)
 
 
 # =============================================================================
@@ -632,9 +700,12 @@ class TestSpACERDecompSpatial:
         pred = _make_pred_pixels([(0, 0, 0), (1, 0, 0)])
         d = spacer_decomp_spatial(gt, pred, {}, {0: "aa", 1: "a"})
         # R_agg has "a":2 (double counted), S_agg has "a":3.
-        # d_pars compares R(a:2) vs Q(a:1): E_hat=1, D_macro=0
-        # → SpACER = (0+1)/(2*1) = 0.5
-        assert d.d_pars_macro == pytest.approx(0.5)
+        # d_pars compares R(a:2) vs Q(a:1): E_hat=1, D_macro=0, I_macro=1
+        # → SpACER = (1+0+1)/(2*1) = 1.0
+        assert d.d_pars_macro == pytest.approx(1.0)
+        # d_total compares S(a:3) vs Q(a:1): E_hat=2, D_macro=0, I_macro=2
+        # → SpACER = (2+0+2)/(2*1) = 2.0
+        assert d.d_total_macro == pytest.approx(2.0)
 
     def test_missing_region_in_ocr_gt_handled(self):
         # pred_gt_ocr has no entry for region 2 — should not raise.

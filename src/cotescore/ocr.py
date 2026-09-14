@@ -1,6 +1,6 @@
 
 from collections import Counter
-from typing import Callable, List, Dict, Union, Tuple, Optional
+from typing import Callable, List, Dict, NamedTuple, Union, Tuple, Optional
 import numpy as np
 
 from cotescore.types import CDDDecomposition, RegionChars, SpACERDecomposition
@@ -122,13 +122,40 @@ def jsd_distance(p: Counter, q: Counter) -> float:
 # distribution-based CDD metrics: SpACER operates on raw token counts, not
 # normalised probability distributions.
 #
+#   SpACER = (E_hat + D + I) / (2 * C)
+#
+# E_hat is the L1 distance between the reference and predicted count vectors,
+# D the net deletion count and I the net insertion count. Mirroring CER's
+# (S + D + I) / N, a pure deletion of k tokens, a pure insertion of k tokens
+# and k substitutions all score k / C.
+#
 # =============================================================================
+
+
+class SpACERCounts(NamedTuple):
+    """Raw SpACER components returned by :func:`_spacer_counts`.
+
+    Attributes:
+        E_hat:   L1 norm of element-wise count differences (aggregated).
+        C:       Total token count in the reference.
+        D_macro: max(0, total_ref - total_pred), page-level deletion count.
+        I_macro: max(0, total_pred - total_ref), page-level insertion count.
+        D_micro: Sum over boxes of max(0, ref_j - pred_j), box-level deletions.
+        I_micro: Sum over boxes of max(0, pred_j - ref_j), box-level insertions.
+    """
+
+    E_hat: float
+    C: float
+    D_macro: float
+    I_macro: float
+    D_micro: float
+    I_micro: float
 
 
 def _spacer_counts(
     ref_boxes: List[Counter],
     pred_boxes: List[Counter],
-) -> Tuple[float, float, float, float]:
+) -> SpACERCounts:
     """Compute raw SpACER components from per-box token-frequency Counters.
 
     Args:
@@ -137,15 +164,14 @@ def _spacer_counts(
                     Must have the same length as ref_boxes.
 
     Returns:
-        Tuple of (E_hat, C, D_macro, D_micro) where:
-            E_hat   — L1 norm of element-wise count differences (aggregated).
-            C       — total token count in the reference.
-            D_macro — max(0, total_ref - total_pred), page-level deletion count.
-            D_micro — sum over boxes of max(0, ref_j - pred_j), box-level deletions.
+        :class:`SpACERCounts`. At page level exactly one of D_macro / I_macro
+        is non-zero and ``D_macro + I_macro == |total_ref - total_pred|``;
+        at box level ``D_micro + I_micro == sum_j |ref_j - pred_j|``.
     """
     agg_ref: Counter = Counter()
     agg_pred: Counter = Counter()
     D_micro = 0.0
+    I_micro = 0.0
 
     for ref_c, pred_c in zip(ref_boxes, pred_boxes):
         agg_ref += ref_c
@@ -153,21 +179,25 @@ def _spacer_counts(
         ref_total = sum(ref_c.values())
         pred_total = sum(pred_c.values())
         D_micro += max(0, ref_total - pred_total)
+        I_micro += max(0, pred_total - ref_total)
 
     all_tokens = set(agg_ref) | set(agg_pred)
     E_hat = sum(abs(agg_ref.get(t, 0) - agg_pred.get(t, 0)) for t in all_tokens)
 
     C = float(sum(agg_ref.values()))
-    D_macro = float(max(0, sum(agg_ref.values()) - sum(agg_pred.values())))
+    total_ref = sum(agg_ref.values())
+    total_pred = sum(agg_pred.values())
+    D_macro = float(max(0, total_ref - total_pred))
+    I_macro = float(max(0, total_pred - total_ref))
 
-    return float(E_hat), C, D_macro, float(D_micro)
+    return SpACERCounts(float(E_hat), C, D_macro, I_macro, float(D_micro), float(I_micro))
 
 
-def _spacer_score(D: float, E_hat: float, C: float) -> float:
-    """Apply the SpACER formula: (D + E_hat) / (2 * C)."""
+def _spacer_score(E_hat: float, D: float, I: float, C: float) -> float:
+    """Apply the SpACER formula: (E_hat + D + I) / (2 * C)."""
     if C == 0:
         return 0.0
-    return (D + E_hat) / (2.0 * C)
+    return (E_hat + D + I) / (2.0 * C)
 
 
 def spacer(reference: Counter, prediction: Counter) -> float:
@@ -183,8 +213,8 @@ def spacer(reference: Counter, prediction: Counter) -> float:
     Returns:
         Macro SpACER score. 0.0 when both are empty. Can exceed 1.0.
     """
-    E_hat, C, D_macro, _ = _spacer_counts([reference], [prediction])
-    return _spacer_score(D_macro, E_hat, C)
+    k = _spacer_counts([reference], [prediction])
+    return _spacer_score(k.E_hat, k.D_macro, k.I_macro, k.C)
 
 
 def spacer_micro(
@@ -193,8 +223,9 @@ def spacer_micro(
 ) -> float:
     """Micro SpACER from per-box token-frequency Counters.
 
-    Deletions are accumulated per box before summing, preventing insertions
-    in one box from masking deletions in another.
+    Deletions and insertions are accumulated per box before summing, so an
+    insertion in one box cannot cancel a deletion in another (as it would in
+    the page-level macro count).
 
     Args:
         ref_boxes:  Per-box GT Counters.
@@ -203,8 +234,8 @@ def spacer_micro(
     Returns:
         Micro SpACER score. 0.0 when all boxes are empty. Can exceed 1.0.
     """
-    E_hat, C, _, D_micro = _spacer_counts(ref_boxes, pred_boxes)
-    return _spacer_score(D_micro, E_hat, C)
+    k = _spacer_counts(ref_boxes, pred_boxes)
+    return _spacer_score(k.E_hat, k.D_micro, k.I_micro, k.C)
 
 
 # =============================================================================
@@ -315,10 +346,11 @@ def spacer_decomp(
     def _cmp(ref_key: str, pred_key: str) -> Tuple[Optional[float], Optional[float]]:
         if ref_key not in box_counters or pred_key not in box_counters:
             return None, None
-        E_hat, C, D_macro, D_micro = _spacer_counts(
-            box_counters[ref_key], box_counters[pred_key]
+        k = _spacer_counts(box_counters[ref_key], box_counters[pred_key])
+        return (
+            _spacer_score(k.E_hat, k.D_macro, k.I_macro, k.C),
+            _spacer_score(k.E_hat, k.D_micro, k.I_micro, k.C),
         )
-        return _spacer_score(D_macro, E_hat, C), _spacer_score(D_micro, E_hat, C)
 
     pars_mac, pars_mic = _cmp("gt", "parsing")
     ocr_mac, ocr_mic = _cmp("gt", "ocr")
@@ -352,7 +384,8 @@ def spacer_decomp(
 #                                      by pred_region_id)
 #
 # d_pars_micro is None: GT and predicted regions use different id spaces with
-# no natural pairing, so per-box deletions cannot be meaningfully accumulated.
+# no natural pairing, so per-box deletions and insertions cannot be
+# meaningfully accumulated.
 # All other macro and micro components are computed when data is available.
 #
 # =============================================================================
@@ -438,8 +471,8 @@ def spacer_decomp_spatial(
     # --- d_pars (macro only) ---
     pars_mac: Optional[float] = None
     if Q or R_agg:
-        E_hat, C, D_macro, _ = _spacer_counts([Q], [R_agg])
-        pars_mac = _spacer_score(D_macro, E_hat, C)
+        k = _spacer_counts([Q], [R_agg])
+        pars_mac = _spacer_score(k.E_hat, k.D_macro, k.I_macro, k.C)
 
     # --- d_ocr (macro + micro, paired on gt_region_id) ---
     ocr_mac: Optional[float] = None
@@ -458,9 +491,9 @@ def spacer_decomp_spatial(
             text_to_counter(pred_gt_ocr[rid], mode) if rid in pred_gt_ocr else Counter()
             for rid in all_gt_ids
         ]
-        E_hat, C, D_macro, D_micro = _spacer_counts(ocr_ref, ocr_pred)
-        ocr_mac = _spacer_score(D_macro, E_hat, C)
-        ocr_mic = _spacer_score(D_micro, E_hat, C)
+        k = _spacer_counts(ocr_ref, ocr_pred)
+        ocr_mac = _spacer_score(k.E_hat, k.D_macro, k.I_macro, k.C)
+        ocr_mic = _spacer_score(k.E_hat, k.D_micro, k.I_micro, k.C)
 
     # --- d_int and d_total (macro + micro, paired on pred_region_id) ---
     int_mac: Optional[float] = None
@@ -476,19 +509,23 @@ def spacer_decomp_spatial(
         ]
 
         # d_int: R vs S per predicted region.
-        E_hat, C, D_macro, D_micro = _spacer_counts(pred_ref, pred_s)
-        int_mac = _spacer_score(D_macro, E_hat, C)
-        int_mic = _spacer_score(D_micro, E_hat, C)
+        k = _spacer_counts(pred_ref, pred_s)
+        int_mac = _spacer_score(k.E_hat, k.D_macro, k.I_macro, k.C)
+        int_mic = _spacer_score(k.E_hat, k.D_micro, k.I_micro, k.C)
 
         # d_total: Q (aggregate) vs S (aggregate + per predicted region).
-        # D_micro uses R_j as reference (= Q chars in predicted region j),
-        # which is identical to d_int_micro. E_hat differs: uses Q vs S_agg.
+        # D_micro / I_micro use R_j as reference (= Q chars in predicted
+        # region j), identical to d_int_micro. E_hat, D_macro and I_macro
+        # differ: they use Q vs S_agg.
         S_agg = Counter(tok for c in pred_s for tok in c.elements())
         all_tokens = set(Q) | set(S_agg)
         E_hat_total = float(sum(abs(Q.get(t, 0) - S_agg.get(t, 0)) for t in all_tokens))
         C_total = float(sum(Q.values()))
-        tot_mac = _spacer_score(float(max(0, sum(Q.values()) - sum(S_agg.values()))), E_hat_total, C_total)
-        tot_mic = _spacer_score(D_micro, E_hat_total, C_total)
+        n_S = sum(S_agg.values())
+        D_total_mac = float(max(0, C_total - n_S))
+        I_total_mac = float(max(0, n_S - C_total))
+        tot_mac = _spacer_score(E_hat_total, D_total_mac, I_total_mac, C_total)
+        tot_mic = _spacer_score(E_hat_total, k.D_micro, k.I_micro, C_total)
 
     return SpACERDecomposition(
         d_pars_macro=pars_mac,

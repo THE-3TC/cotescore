@@ -118,8 +118,8 @@ From those come the four components — `d_pars` (parsing alone), `d_ocr` (OCR g
 
 | Function | Description |
 |---|---|
-| `spacer(reference, prediction)` | Macro SpACER between two token Counters `[0, ∞)` |
-| `spacer_micro(ref_boxes, pred_boxes)` | Per-box SpACER, so deletions in one box are not masked by insertions in another |
+| `spacer(reference, prediction)` | Macro SpACER between two token Counters `[0, ∞)`: $(\hat{E} + D + I) / 2C$ with net deletions $D$ and insertions $I$ at page level |
+| `spacer_micro(ref_boxes, pred_boxes)` | Per-box SpACER: $D$ and $I$ accumulated per box, so a deletion in one box is not cancelled by an insertion in another |
 | `spacer_decomp(named_dict)` | Four-way SpACER decomposition (macro and micro) from page or per-box text |
 | `cdd_decomp(named_dict)` | Four-way CDD decomposition; any `(Counter, Counter) -> float` metric can be substituted |
 | `spacer_decomp_spatial(gt_chars, pred_regions, ...)` | As above, building $R$ by joining character positions to predicted regions |

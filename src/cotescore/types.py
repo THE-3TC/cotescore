@@ -175,8 +175,9 @@ class SpACERDecomposition:
     """Four-way SpACER decomposition result with macro and micro variants.
 
     Each of the four error components is computed at both macro (page-level
-    deletion) and micro (per-box deletion) granularity. Both values are
-    produced simultaneously as the computation is cheap.
+    deletion/insertion counts) and micro (per-box deletion/insertion counts)
+    granularity. Both values are produced simultaneously as the computation
+    is cheap.
 
     Any component whose required keys were absent from the input dict is None.
 
@@ -187,14 +188,14 @@ class SpACERDecomposition:
         "total"   -> S  (OCR output on predicted regions)
 
     Attributes:
-        d_pars_macro:  SpACER_macro(R, Q) — parsing error, page-level D.
-        d_pars_micro:  SpACER_micro(R, Q) — parsing error, box-level D.
-        d_ocr_macro:   SpACER_macro(S*, Q) — OCR error, page-level D.
-        d_ocr_micro:   SpACER_micro(S*, Q) — OCR error, box-level D.
-        d_int_macro:   SpACER_macro(S, R)  — interaction error, page-level D.
-        d_int_micro:   SpACER_micro(S, R)  — interaction error, box-level D.
-        d_total_macro: SpACER_macro(S, Q)  — total error, page-level D.
-        d_total_micro: SpACER_micro(S, Q)  — total error, box-level D.
+        d_pars_macro:  SpACER_macro(R, Q) — parsing error, page-level D, I.
+        d_pars_micro:  SpACER_micro(R, Q) — parsing error, box-level D, I.
+        d_ocr_macro:   SpACER_macro(S*, Q) — OCR error, page-level D, I.
+        d_ocr_micro:   SpACER_micro(S*, Q) — OCR error, box-level D, I.
+        d_int_macro:   SpACER_macro(S, R)  — interaction error, page-level D, I.
+        d_int_micro:   SpACER_micro(S, R)  — interaction error, box-level D, I.
+        d_total_macro: SpACER_macro(S, Q)  — total error, page-level D, I.
+        d_total_micro: SpACER_micro(S, Q)  — total error, box-level D, I.
     """
 
     d_pars_macro: Optional[float]
