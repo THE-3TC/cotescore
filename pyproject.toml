@@ -28,6 +28,7 @@ dependencies = [
     "pillow>=9.0.0",
     "datasets>=2.0.0",
     "matplotlib>=3.5.0",
+    "pycocotools>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -43,8 +44,6 @@ dev = [
 benchmarks = [
     "torch>=2.5.1",
     "torchvision>=0.20.1",
-    "torchmetrics>=1.0.0",
-    "pycocotools>=2.0.0",
     "transformers>=4.46.3",
     "datasets>=2.0.0",
     "huggingface-hub>=0.16.0",
@@ -81,7 +80,6 @@ pipeline = [
 
 paddle-benchmark = [
     # benchmark deps only, no torch
-    "pycocotools>=2.0.0",
     "datasets>=2.0.0",
     "huggingface-hub>=0.16.0",
     "evaluate>=0.4.0",

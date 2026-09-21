@@ -1,170 +1,218 @@
 """
-mAP Metric implementation using torchmetrics.
+COCO-style mean Average Precision (mAP) on top of pycocotools.
 
-This module provides a wrapper around torchmetrics.detection.mean_ap.MeanAveragePrecision
-to compute COCO-style mAP scores for document layout analysis.
+:class:`MAPMetric` accumulates per-image predictions and ground truth, then
+runs ``pycocotools.cocoeval.COCOeval`` over the whole set. It reports the
+standard COCO numbers (AP@[.50:.05:.95], AP@.50, AP@.75) plus per-class AP.
+
+Both box (``iou_type="bbox"``) and pixel (``iou_type="segm"``) matching are
+supported. In ``segm`` mode each annotation carries a boolean ``mask`` array
+(or a pre-encoded COCO ``segmentation``) instead of ``x/y/width/height``.
 """
 
-from typing import List, Dict, Any, Union, Optional
+from __future__ import annotations
+
+import contextlib
+import io
 import logging
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# COCO convention: an AP that could not be computed (e.g. no GT for a class).
+_UNDEFINED = -1.0
 
 
 class MAPMetric:
     """
-    Wrapper for computing Mean Average Precision (mAP).
-    Wrapper around torchmetrics.detection.mean_ap.MeanAveragePrecision.
+    Accumulate detections image by image and compute COCO mAP.
+
+    Args:
+        iou_type: ``"bbox"`` (default) matches on axis-aligned boxes;
+            ``"segm"`` matches on binary masks.
+        max_dets: COCO ``maxDets`` thresholds. The last value caps the
+            number of predictions scored per image; the default raises the
+            COCO cap of 100 so dense pages are not silently truncated.
+
+    Each ``update`` call is one image. Prediction dicts must contain
+    ``class`` and ``confidence``; ground-truth dicts must contain ``class``.
+    Geometry is ``x``, ``y``, ``width``, ``height`` (pixels, top-left origin)
+    for ``bbox``, or ``mask`` (``(H, W)`` bool array) / ``segmentation``
+    (COCO RLE or polygon) for ``segm``.
     """
 
-    def __init__(self):
-        """
-        Initialize the mAP metric.
-        Raises ImportError if torchmetrics is not installed.
-        """
+    def __init__(self, iou_type: str = "bbox", max_dets: Sequence[int] = (1, 10, 500)):
+        if iou_type not in ("bbox", "segm"):
+            raise ValueError(f"iou_type must be 'bbox' or 'segm', got {iou_type!r}")
         try:
-            import torch
-            from torchmetrics.detection.mean_ap import MeanAveragePrecision
+            import pycocotools  # noqa: F401
         except ImportError as e:
-            logger.error("torchmetrics or torch not installed. Cannot use MAPMetric.")
-            raise ImportError(
-                "MAPMetric requires 'benchmarks' dependencies. Install with pip install '.[benchmarks]'"
-            ) from e
+            raise ImportError("MAPMetric requires 'pycocotools'. Install with pip install pycocotools") from e
 
-        # Enable class_metrics to get per-class scores
-        self.metric = MeanAveragePrecision(box_format="xywh", iou_type="bbox", class_metrics=True)
-        self._label_map = {}
+        self.iou_type = iou_type
+        self.max_dets = list(max_dets)
+        self._label_map: Dict[str, int] = {}
         self._next_id = 0
+        self.reset()
 
-    def update(self, predictions: List[Dict[str, Any]], ground_truth: List[Dict[str, Any]]):
+    def reset(self) -> None:
+        """Discard all accumulated images and annotations (labels are kept)."""
+        self._images: List[Dict[str, Any]] = []
+        self._gt_anns: List[Dict[str, Any]] = []
+        self._pred_anns: List[Dict[str, Any]] = []
+        self._next_image_id = 1
+        self._next_gt_id = 1
+
+    # ------------------------------------------------------------------ input
+    def update(
+        self,
+        predictions: List[Dict[str, Any]],
+        ground_truth: List[Dict[str, Any]],
+        image_size: Optional[Tuple[int, int]] = None,
+    ) -> None:
         """
-        Add a batch of predictions and ground truths.
+        Add one image's predictions and ground truth.
 
         Args:
-            predictions: List of dicts for one image.
-                         Each dict: {'x', 'y', 'width', 'height', 'class', 'confidence'}
-            ground_truth: List of dicts for one image.
-                          Each dict: {'x', 'y', 'width', 'height', 'class'}
+            predictions: Dicts with geometry, ``class`` and ``confidence``.
+            ground_truth: Dicts with geometry and ``class``.
+            image_size: ``(height, width)``. Required for ``segm`` when
+                annotations use polygon ``segmentation``; inferred from
+                ``mask`` arrays otherwise.
         """
-        pred_boxes = []
-        pred_scores = []
-        pred_labels = []
+        image_id = self._next_image_id
+        self._next_image_id += 1
 
-        for p in predictions:
-            pred_boxes.append([p["x"], p["y"], p["width"], p["height"]])
-            pred_scores.append(p.get("confidence", 0.0))
-            pred_labels.append(self._get_label_id(p["class"]))
-
-        target_boxes = []
-        target_labels = []
+        h, w = self._resolve_image_size(predictions, ground_truth, image_size)
+        self._images.append({"id": image_id, "height": h, "width": w})
 
         for g in ground_truth:
-            target_boxes.append([g["x"], g["y"], g["width"], g["height"]])
-            target_labels.append(self._get_label_id(g["class"]))
+            ann = self._to_coco_ann(g, image_id, h, w)
+            ann["id"] = self._next_gt_id
+            self._next_gt_id += 1
+            self._gt_anns.append(ann)
 
-        import torch
+        for p in predictions:
+            ann = self._to_coco_ann(p, image_id, h, w)
+            ann["score"] = float(p.get("confidence", 0.0))
+            self._pred_anns.append(ann)
 
-        p_dict = {
-            "boxes": (
-                torch.tensor(pred_boxes, dtype=torch.float32) if pred_boxes else torch.empty((0, 4))
-            ),
-            "scores": (
-                torch.tensor(pred_scores, dtype=torch.float32) if pred_scores else torch.empty(0)
-            ),
-            "labels": (
-                torch.tensor(pred_labels, dtype=torch.long)
-                if pred_labels
-                else torch.empty(0, dtype=torch.long)
-            ),
+    def _resolve_image_size(self, predictions, ground_truth, image_size) -> Tuple[int, int]:
+        if image_size is not None:
+            return int(image_size[0]), int(image_size[1])
+        if self.iou_type == "segm":
+            for a in list(ground_truth) + list(predictions):
+                if "mask" in a:
+                    return tuple(int(v) for v in np.asarray(a["mask"]).shape[:2])
+        # bbox mode never reads the image extent; segm with pre-encoded RLE
+        # carries its own size, so a placeholder is sufficient.
+        return 0, 0
+
+    def _to_coco_ann(self, a: Dict[str, Any], image_id: int, h: int, w: int) -> Dict[str, Any]:
+        ann: Dict[str, Any] = {
+            "image_id": image_id,
+            "category_id": self._get_label_id(a["class"]),
+            "iscrowd": 0,
         }
+        if self.iou_type == "bbox":
+            bw, bh = float(a["width"]), float(a["height"])
+            ann["bbox"] = [float(a["x"]), float(a["y"]), bw, bh]
+            ann["area"] = bw * bh
+        else:
+            from pycocotools import mask as mask_utils
 
-        t_dict = {
-            "boxes": (
-                torch.tensor(target_boxes, dtype=torch.float32)
-                if target_boxes
-                else torch.empty((0, 4))
-            ),
-            "labels": (
-                torch.tensor(target_labels, dtype=torch.long)
-                if target_labels
-                else torch.empty(0, dtype=torch.long)
-            ),
-        }
+            if "mask" in a:
+                m = np.asfortranarray(np.asarray(a["mask"], dtype=np.uint8))
+                rle = mask_utils.encode(m)
+            elif "segmentation" in a:
+                seg = a["segmentation"]
+                if isinstance(seg, dict) and isinstance(seg.get("counts"), bytes):
+                    rle = seg
+                else:  # polygon list or uncompressed RLE
+                    if not (h and w):
+                        raise ValueError("image_size is required for polygon / uncompressed RLE segmentation")
+                    rles = mask_utils.frPyObjects(seg, h, w)
+                    rle = mask_utils.merge(rles) if isinstance(rles, list) else rles
+            else:
+                raise KeyError("segm annotations need a 'mask' or 'segmentation' key")
+            ann["segmentation"] = rle
+            ann["area"] = float(mask_utils.area(rle))
+            ann["bbox"] = [float(v) for v in mask_utils.toBbox(rle)]
+        return ann
 
-        self.metric.update([p_dict], [t_dict])
-
+    # ---------------------------------------------------------------- output
     def compute(self) -> Dict[str, Any]:
         """
-        Compute the final mAP scores.
+        Compute COCO mAP over everything accumulated so far.
 
         Returns:
-            Dictionary containing:
-            - map: mAP (IoU=0.50:0.05:0.95)
-            - map_50: mAP (IoU=0.50)
-            - map_75: mAP (IoU=0.75)
-            - classes: Dict[str, float] (per-class AP)
+            ``{"map", "map_50", "map_75", "classes": {name: AP}}``.
+            ``map*`` are AP@[.50:.05:.95], AP@.50 and AP@.75 over all classes.
+            A value of ``-1.0`` follows the COCO convention for "undefined"
+            (no ground truth to score against). With no predictions every
+            AP is ``0.0``.
         """
-        try:
-            results = self.metric.compute()
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
 
-            final_res = {
-                "map": float(results["map"]),
-                "map_50": float(results["map_50"]),
-                "map_75": float(results["map_75"]),
-                "classes": {},
-            }
+        classes = sorted(self._label_map.items(), key=lambda kv: kv[1])
+        if not self._gt_anns:
+            return {"map": _UNDEFINED, "map_50": _UNDEFINED, "map_75": _UNDEFINED,
+                    "classes": {name: _UNDEFINED for name, _ in classes}}
+        if not self._pred_anns:
+            gt_cats = {a["category_id"] for a in self._gt_anns}
+            return {"map": 0.0, "map_50": 0.0, "map_75": 0.0,
+                    "classes": {name: (0.0 if cid in gt_cats else _UNDEFINED) for name, cid in classes}}
 
-            # Map per-class results back to names
-            if "map_per_class" in results:
-                per_class_scores = results["map_per_class"]
+        coco_gt = COCO()
+        coco_gt.dataset = {
+            "images": self._images,
+            "annotations": self._gt_anns,
+            "categories": [{"id": cid, "name": name} for name, cid in classes],
+        }
+        with contextlib.redirect_stdout(io.StringIO()):
+            coco_gt.createIndex()
+            coco_dt = coco_gt.loadRes(self._pred_anns)
+            ev = COCOeval(coco_gt, coco_dt, iouType=self.iou_type)
+            ev.params.maxDets = self.max_dets
+            ev.evaluate()
+            ev.accumulate()
 
-                # Handle 0-d tensor (scalar) case when only 1 class exists
-                if per_class_scores.ndim == 0:
-                    per_class_scores = per_class_scores.unsqueeze(0)
+        # precision: [T iou thresholds, R recall points, K categories, A area ranges, M maxDets]
+        precision = ev.eval["precision"][:, :, :, 0, -1]  # area='all', maxDets=max
+        iou_thrs = ev.params.iouThrs
 
-                # We iterate through the scores.
-                # TorchMetrics documentation says "map_per_class" returns tensor of shape (C).
-                # The assumption is it corresponds to the sorted unique label IDs found in data?
-                # Actually, `MeanAveragePrecision` infers classes if not specified.
-                # If we rely on _get_label_id which assigns 0, 1, 2... in order of appearance?
-                # No, they are IDs. Torchmetrics likely sorts them 0, 1, 2...
-                # Wait, if we have sparse IDs (e.g. 0, 5, 10), torchmetrics might condense or index by max ID?
-                # "If class_metrics is True, ... map_per_class: tensor (C) ... where C is the number of classes."
-                # It doesn't explicitly guarantee ordering if IDs are sparse.
-                # However, with _get_label_id starting at 0 and incrementing, we have compact IDs 0..N-1.
-                # So we can safely map index -> name using our _get_label_id reverse lookup.
+        def _ap(p: np.ndarray) -> float:
+            valid = p[p > -1]
+            return float(valid.mean()) if valid.size else _UNDEFINED
 
-                # Check consistency
-                # We need to ensure that the metric saw ALL classes or at least up to max_id.
+        t50 = int(np.argmin(np.abs(iou_thrs - 0.50)))
+        t75 = int(np.argmin(np.abs(iou_thrs - 0.75)))
+        cat_index = {cid: k for k, cid in enumerate(ev.params.catIds)}
 
-                for idx, score in enumerate(per_class_scores):
-                    # idx corresponds to label ID because our IDs are 0-based packed.
-                    class_name = self.get_class_name(idx)
-                    final_res["classes"][class_name] = float(score)
+        return {
+            "map": _ap(precision),
+            "map_50": _ap(precision[t50]),
+            "map_75": _ap(precision[t75]),
+            "classes": {
+                name: (_ap(precision[:, :, cat_index[cid]]) if cid in cat_index else _UNDEFINED)
+                for name, cid in classes
+            },
+        }
 
-            return final_res
-
-        except Exception as e:
-            logger.error(f"Failed to compute mAP: {e}")
-            import traceback
-
-            traceback.print_exc()
-            return {"map": 0.0, "map_50": 0.0, "map_75": 0.0}
-
-    def _get_label_id(self, label_str: str) -> int:
-        """Map string label to stable integer ID."""
-        if isinstance(label_str, int):
-            # If already int, assume it's stable? Better to stringify to ensure consistent map if mixed types
-            label_str = str(label_str)
-
+    # ---------------------------------------------------------------- labels
+    def _get_label_id(self, label_str: Any) -> int:
+        """Map a class label to a stable integer category id (packed from 0)."""
+        label_str = str(label_str)
         if label_str not in self._label_map:
             self._label_map[label_str] = self._next_id
             self._next_id += 1
-
         return self._label_map[label_str]
 
     def get_class_name(self, label_id: int) -> str:
-        """Reverse map ID to name."""
+        """Reverse map category id to class name."""
         for name, lid in self._label_map.items():
             if lid == label_id:
                 return name
