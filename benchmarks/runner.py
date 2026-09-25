@@ -435,9 +435,12 @@ class BenchmarkRunner:
                     results["metrics"][key] = map_scores[key]
                 results["classes"] = map_scores["classes"]
             if "f1_50" in metrics:
-                # Pooled TP/FP/FN over the set (micro average), not a mean of per-image F1.
+                # f1_50 pools TP/FP/FN over the set, so every region counts equally (COCO
+                # convention). f1_50_page_mean averages per-page F1, so every page counts
+                # equally, matching how COTe and the other area metrics are averaged.
                 for key in ("f1_50", "precision_50", "recall_50"):
                     results["metrics"][key] = map_scores[key]
+                results["metrics"]["f1_50_page_mean"] = float(np.mean(map_scores["per_image_f1_50"]))
                 for img, score in zip(results["per_image_results"], map_scores["per_image_f1_50"]):
                     img["metrics"]["f1_50"] = score
 
@@ -469,7 +472,7 @@ class BenchmarkRunner:
             print(f"  mAP@75         : {metrics['map_75']:.4f}")
             print("-" * 30)
 
-        for name in ["mean_iou", "f1_50", "precision_50", "recall_50", "coverage", "overlap", "trespass"]:
+        for name in ["mean_iou", "f1_50", "f1_50_page_mean", "precision_50", "recall_50", "coverage", "overlap", "trespass"]:
             if name in metrics:
                 print(f"  {name.upper():15s}: {metrics[name]:.4f}")
 

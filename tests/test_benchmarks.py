@@ -98,6 +98,7 @@ class TestRunEvaluation:
         assert results["metrics"]["recall_50"] == pytest.approx(2 / 3)
         per_image = [r["metrics"]["f1_50"] for r in results["per_image_results"]]
         assert per_image == pytest.approx([0.5, 1.0])
+        assert results["metrics"]["f1_50_page_mean"] == pytest.approx(0.75)
 
     def test_predictions_csv_reproduces_metrics(self, tmp_path):
         import pandas as pd
