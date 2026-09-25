@@ -52,9 +52,23 @@ GT_2CLASS = _make_gt_ssu_map(H, W, {1: (0, 5, 0, 10), 2: (5, 10, 0, 10)})
 
 
 class TestCoverageMatrix:
-    """C[k,l] = sum(ms_l & mp_k_b) / A^P_k
-    "Of all class-k prediction area, what fraction lands on class-l GT?"
+    """C[k,l] = sum(ms_l & mp_k_b) / sum(ms & mp_k_b)
+    "Of the class-k prediction area on GT, what fraction lands on class-l GT?"
+    Rows sum to 1; background is excluded.
     """
+
+    def test_background_excluded_rows_sum_to_one(self):
+        """SSU 1 (A) rows 0-4, SSU 2 (B) rows 5-8, row 9 background.
+        An A pred over the whole page (100 px): 50 on A, 40 on B, 10 on
+        background. C[A,A] = 50/90, C[A,B] = 40/90. Precision keeps the
+        background in its denominator: 50/100."""
+        gt = _make_gt_ssu_map(H, W, {1: (0, 5, 0, 10), 2: (5, 9, 0, 10)})
+        preds = [_mask(H, W, 0, 10, 0, 10, "A")]
+        result = cote_class(gt, SSU_TO_CLASS_2, preds)
+        a, b = result.classes.index("A"), result.classes.index("B")
+        assert abs(result.coverage_matrix[a, a] - 50 / 90) < TOLERANCE
+        assert abs(result.coverage_matrix[a, b] - 40 / 90) < TOLERANCE
+        assert abs(result.coverage_precision[a] - 0.5) < TOLERANCE
 
     def test_perfect_within_class_coverage(self):
         """When each pred exactly matches its class GT, diagonal = 1.0."""
@@ -87,7 +101,7 @@ class TestCoverageMatrix:
         assert abs(C[a, a] - 0.0) < TOLERANCE
 
     def test_partial_coverage_normalised_by_pred_area(self):
-        """Normalization is A^P_k (pred area), not GT area.
+        """Normalization is class-k pred area on GT, not GT area.
         An A pred of 25 px all on A GT → C[A,A] = 25/25 = 1.0 (not 0.5).
         """
         preds = [_mask(H, W, 0, 5, 0, 5, "A")]  # 25 px, all on A's GT
@@ -96,7 +110,7 @@ class TestCoverageMatrix:
         assert abs(C[a, a] - 1.0) < TOLERANCE
 
     def test_pred_split_across_classes(self):
-        """A pred spanning both classes: fractions sum to ≤1 (remainder on background)."""
+        """A pred spanning both classes: fractions sum to 1."""
         # A pred covering rows 0-9, cols 0-10 = 100 px
         # 50 px on A GT, 50 px on B GT → C[A,A]=0.5, C[A,B]=0.5
         preds = [_mask(H, W, 0, 10, 0, 10, "A")]
@@ -123,10 +137,57 @@ class TestCoverageMatrix:
 
 
 class TestOverlapMatrix:
-    """O[k,l] = sum(ms_l & (mp_k - mp_k_b)) / A^O_k
-    "Of all class-k redundant prediction area on GT, what fraction lands on class-l GT?"
-    Row k is zero when class k has no redundant predictions.
+    """O[k,l] = sum(M^O & ms_l * mp_k) / A^O_k, with M^O = [mp_global > 1]
+    "Of the overlapping GT area of the class-k predictions, what fraction lands
+    on class-l GT?" Row k is zero when no class-k prediction lies on overlap.
     """
+
+    def test_cross_class_overlap_appears_in_both_rows(self):
+        """An A pred over all GT and a B pred over B's GT overlap on B's 50px.
+        Both classes are involved in that overlap, so both rows register it:
+        O[A,B] = 50/50 = 1.0 and O[B,B] = 50/50 = 1.0.
+        """
+        preds = [
+            _mask(H, W, 0, 10, 0, 10, "A"),
+            _mask(H, W, 5, 10, 0, 10, "B"),
+        ]
+        O, classes = overlap_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
+        a, b = classes.index("A"), classes.index("B")
+        assert abs(O[a, b] - 1.0) < TOLERANCE
+        assert abs(O[b, b] - 1.0) < TOLERANCE
+        assert abs(O[a, a] - 0.0) < TOLERANCE
+
+    def test_row_independent_of_other_class_pred_count(self):
+        """Stacking more B preds on the same overlap must not change row A.
+        A spans all GT (A's 50px, B's 50px). One extra A pred sits on A's GT;
+        B preds sit on B's GT. Row A is 100px on A GT, 50px on B GT: 2/3, 1/3,
+        whether there is one B pred or five.
+        """
+        base = [
+            _mask(H, W, 0, 10, 0, 10, "A"),
+            _mask(H, W, 0, 5, 0, 10, "A"),
+        ]
+        for n_b in (1, 5):
+            preds = base + [_mask(H, W, 5, 10, 0, 10, "B")] * n_b
+            O, classes = overlap_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
+            a, b = classes.index("A"), classes.index("B")
+            assert abs(O[a, a] - 2 / 3) < TOLERANCE, n_b
+            assert abs(O[a, b] - 1 / 3) < TOLERANCE, n_b
+
+    def test_cote_class_and_counts_match_standalone(self):
+        preds = [
+            _mask(H, W, 0, 10, 0, 10, "A"),
+            _mask(H, W, 0, 5, 0, 10, "A"),
+            _mask(H, W, 5, 10, 0, 10, "B"),
+            _mask(H, W, 5, 10, 0, 10, "B"),
+        ]
+        O, classes = overlap_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
+        via_class = cote_class(GT_2CLASS, SSU_TO_CLASS_2, preds).overlap_matrix
+        via_counts = finalize_class_counts(
+            class_confusion_counts(GT_2CLASS, SSU_TO_CLASS_2, preds, classes)
+        ).overlap_matrix
+        np.testing.assert_allclose(via_class, O, atol=TOLERANCE)
+        np.testing.assert_allclose(via_counts, O, atol=TOLERANCE)
 
     def test_single_pred_per_class_no_redundancy(self):
         """A single prediction per class produces no redundant area → all rows zero."""
@@ -197,8 +258,9 @@ class TestOverlapMatrix:
 
 
 class TestTrespassMatrix:
-    """T[k,l] = sum_{j in k} sum(ms_{l\\i(j)} & mp_j) / A^P_k
-    Diagonal is non-zero: within-class trespass against other SSUs.
+    """T[k,l] = sum_{j in k} sum(ms_{l\\i(j)} & mp_j) / sum_{j in k} sum(ms_{\\i(j)} & mp_j)
+    Rows sum to 1. The owner SSU is excluded in every column. Diagonal is
+    trespass against other SSUs of the same class.
     """
 
     def test_no_predictions(self):
@@ -212,26 +274,49 @@ class TestTrespassMatrix:
         T, classes = trespass_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
         assert np.allclose(T, 0.0)
 
-    def test_off_diagonal_trespass(self):
-        """A pred (50 px) entirely on B GT → T[A,B] = 50/50 = 1.0."""
+    def test_misclassified_pred_does_not_trespass_on_its_owner(self):
+        """An A pred (50 px) entirely on B's SSU owns that SSU, so it trespasses
+        nowhere. The error is a misclassification, which C[A,B] records."""
         preds = [_mask(H, W, 5, 10, 0, 10, "A")]
         T, classes = trespass_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
         a, b = classes.index("A"), classes.index("B")
-        assert abs(T[a, b] - 1.0) < TOLERANCE
-        assert abs(T[b, a] - 0.0) < TOLERANCE  # no B preds
+        assert np.allclose(T, 0.0)
+        C, _ = coverage_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
+        assert abs(C[a, b] - 1.0) < TOLERANCE
+
+    def test_owner_excluded_in_off_diagonal_column(self):
+        """An A pred on rows 4-9: 10 px on A's SSU 1, 50 px on B's SSU 2, so
+        its owner is SSU 2. Only the 10 px on SSU 1 are trespass:
+        T[A,A] = 10/10 = 1.0, T[A,B] = 0 (the owner is excluded there too)."""
+        preds = [_mask(H, W, 4, 10, 0, 10, "A")]
+        T, classes = trespass_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
+        a, b = classes.index("A"), classes.index("B")
+        assert abs(T[a, a] - 1.0) < TOLERANCE
+        assert abs(T[a, b] - 0.0) < TOLERANCE
+
+    def test_row_split_between_classes_sums_to_one(self):
+        """SSU 1 (A) rows 0-2, SSU 2 (A) rows 3-4, SSU 3 (B) rows 5-9.
+        An A pred on rows 0-6 owns SSU 1 (30 px) and trespasses 20 px on
+        SSU 2 (A) and 20 px on SSU 3 (B): T[A,A] = T[A,B] = 0.5."""
+        gt = _make_gt_ssu_map(H, W, {1: (0, 3, 0, 10), 2: (3, 5, 0, 10), 3: (5, 10, 0, 10)})
+        preds = [_mask(H, W, 0, 7, 0, 10, "A")]
+        T, classes = trespass_matrix(gt, {1: "A", 2: "A", 3: "B"}, preds)
+        a, b = classes.index("A"), classes.index("B")
+        assert abs(T[a, a] - 0.5) < TOLERANCE
+        assert abs(T[a, b] - 0.5) < TOLERANCE
 
     def test_partial_off_diagonal_trespass(self):
         """A pred spanning rows 2-6 (50 px total):
           - rows 2-4 → 30 px on A GT (SSU 1)
           - rows 5-6 → 20 px on B GT (SSU 2)
-        Owner = SSU 1 (30 px overlap > 20 px). A^P_A = 50.
-        T[A,B] = 20/50 = 0.4 (off-diagonal).
+        Owner = SSU 1 (30 px overlap > 20 px). All 20 px of trespass are on B.
+        T[A,B] = 20/20 = 1.0 (off-diagonal).
         T[A,A] = 0 (only one A SSU, so no within-class trespass possible).
         """
         preds = [_mask(H, W, 2, 7, 0, 10, "A")]  # rows 2-6: 30 on A GT, 20 on B GT
         T, classes = trespass_matrix(GT_2CLASS, SSU_TO_CLASS_2, preds)
         a, b = classes.index("A"), classes.index("B")
-        assert abs(T[a, b] - 0.4) < TOLERANCE
+        assert abs(T[a, b] - 1.0) < TOLERANCE
         assert abs(T[a, a] - 0.0) < TOLERANCE  # only one A SSU, no within-class trespass
 
     def test_diagonal_nonzero_within_class_trespass(self):
@@ -246,11 +331,11 @@ class TestTrespassMatrix:
         ssu_to_class = {1: "A", 2: "A", 3: "B"}
         # Pred covers rows 0-4 (50 px). SSU 1 has 30 px, SSU 2 has 20 px → owner = SSU 1.
         # A GT minus SSU 1 = rows 3-4 (SSU 2, 20 px). Pred covers those 20 px.
-        # T[A,A] = 20 / 50 = 0.4
+        # All trespass is on A GT: T[A,A] = 20 / 20 = 1.0
         preds = [_mask(H, W, 0, 5, 0, 10, "A")]
         T, classes = trespass_matrix(gt, ssu_to_class, preds)
         a = classes.index("A")
-        assert abs(T[a, a] - 0.4) < TOLERANCE
+        assert abs(T[a, a] - 1.0) < TOLERANCE
 
     def test_matrix_shape(self):
         T, classes = trespass_matrix(GT_2CLASS, SSU_TO_CLASS_2, [])
@@ -300,6 +385,22 @@ class TestCOTeClass:
         result = cote_class(GT_2CLASS, SSU_TO_CLASS_2, preds)
         if result.trespass_share.sum() > 0:
             assert abs(result.trespass_share.sum() - 1.0) < TOLERANCE
+
+    def test_shares_split_cross_class_pixels_pro_rata(self):
+        # A pred covers all 50px of A's GT; a B pred sits on 25 of those pixels.
+        # The 25 shared pixels count 0.5 to each class, for both the coverage
+        # (50px total) and the redundancy (25px total) they carry. Counting them
+        # once per class instead would give coverage shares summing to 1.5.
+        preds = [
+            _mask(H, W, 0, 5, 0, 10, "A"),
+            _mask(H, W, 0, 5, 0, 5, "B"),
+        ]
+        result = cote_class(GT_2CLASS, SSU_TO_CLASS_2, preds)
+        a, b = result.classes.index("A"), result.classes.index("B")
+        assert abs(result.coverage_share[a] - 0.75) < TOLERANCE
+        assert abs(result.coverage_share[b] - 0.25) < TOLERANCE
+        assert abs(result.overlap_share[a] - 0.5) < TOLERANCE
+        assert abs(result.overlap_share[b] - 0.5) < TOLERANCE
 
     def test_share_vectors_all_zero_when_no_preds(self):
         result = cote_class(GT_2CLASS, SSU_TO_CLASS_2, [])
@@ -369,7 +470,10 @@ class TestCOTeClass:
 class TestCoveragePrecisionRecallF1:
     """coverage_precision[k] = TP_k / A^P_k; coverage_recall[k] = TP_k / A^S_k."""
 
-    def test_precision_matches_coverage_diagonal(self):
+    def test_precision_matches_coverage_diagonal_without_background(self):
+        """Every pred lies on GT here, so the row-normalised C keeps the same
+        denominator as precision (A^P_k). With background they differ; see
+        TestCoverageMatrix.test_background_excluded_rows_sum_to_one."""
         preds = [_mask(H, W, 0, 7, 0, 10, "A"), _mask(H, W, 3, 10, 0, 10, "B")]
         result = cote_class(GT_2CLASS, SSU_TO_CLASS_2, preds)
         a, b = result.classes.index("A"), result.classes.index("B")

@@ -373,3 +373,55 @@ class TestFilenameMapping:
             mapping["EWJ_1858-08-01_page_5.png"]
             == "EWJ_pageid_91483_pagenum_5_1858-08-01_page_1.png"
         )
+
+
+class TestDocLayNetDataset:
+    """Test suite for DocLayNetDataset."""
+
+    def test_pages_of_same_pdf_are_distinct_samples(self, tmp_path):
+        """Pages sharing an ``original_filename`` must keep their own image and GT."""
+        datasets = pytest.importorskip("datasets")
+        from PIL import Image
+
+        rows = []
+        for page_no, (colour, bbox) in enumerate([("red", [10.0, 20.0, 30.0, 40.0]),
+                                                   ("blue", [50.0, 60.0, 70.0, 80.0])]):
+            rows.append(
+                {
+                    "image": Image.new("RGB", (100, 100), colour),
+                    "bboxes": [bbox],
+                    "category_id": [10],
+                    "area": [bbox[2] * bbox[3]],
+                    "metadata": {
+                        "original_filename": "report.pdf",
+                        "page_no": page_no,
+                        "page_hash": f"{page_no:064x}",
+                    },
+                }
+            )
+        ds = datasets.Dataset.from_list(
+            rows, features=datasets.Features(
+                {
+                    "image": datasets.Image(),
+                    "bboxes": datasets.Sequence(datasets.Sequence(datasets.Value("float64"))),
+                    "category_id": datasets.Sequence(datasets.Value("int64")),
+                    "area": datasets.Sequence(datasets.Value("float64")),
+                    "metadata": {
+                        "original_filename": datasets.Value("string"),
+                        "page_no": datasets.Value("int64"),
+                        "page_hash": datasets.Value("string"),
+                    },
+                }
+            )
+        )
+        ds.to_parquet(str(tmp_path / "test-00000-of-00001.parquet"))
+
+        dataset = DocLayNetDataset(tmp_path, split="test")
+        samples = [dataset[i] for i in range(len(dataset))]
+
+        assert len({s["image_path"] for s in samples}) == 2
+        for s, row in zip(samples, rows):
+            with Image.open(s["image_path"]) as img:
+                assert img.getpixel((0, 0)) == row["image"].getpixel((0, 0))
+            gt = s["annotations"][0]
+            assert [gt["x"], gt["y"], gt["width"], gt["height"]] == row["bboxes"][0]

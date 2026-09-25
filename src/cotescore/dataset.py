@@ -366,14 +366,16 @@ class DocLayNetDataset:
 
         for i, row in enumerate(ds):
             # Row has: image, bboxes, category_id, area, metadata
-            metadata = row.get("metadata", {})
-            original_filename = metadata.get("original_filename", f"doclaynet_{self.split}_{i}.png")
+            metadata = row.get("metadata") or {}
+            # ``original_filename`` is the source PDF, shared by every page taken from
+            # it, so the page number and hash are needed to give each page its own file.
+            if "original_filename" in metadata and "page_hash" in metadata:
+                stem = Path(metadata["original_filename"]).stem
+                page_filename = f"{stem}_p{metadata.get('page_no', 0)}_{metadata['page_hash'][:12]}.png"
+            else:
+                page_filename = f"doclaynet_{self.split}_{i}.png"
 
-            # Ensure PNG extension
-            if not original_filename.lower().endswith(".png"):
-                original_filename += ".png"
-
-            image_path = self.images_dir / original_filename
+            image_path = self.images_dir / page_filename
 
             # Cache image to disk if not already present
             if not image_path.exists():

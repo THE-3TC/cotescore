@@ -35,7 +35,6 @@ from cotescore.layout import (
     excess,
     cote_score as cot_score,
     mean_iou,
-    f1,
 )
 from cotescore.map_metric import MAPMetric
 from PIL import Image
@@ -44,6 +43,9 @@ logger = logging.getLogger(__name__)
 
 
 EVAL_MAX_DIM = 2000
+
+# Metrics computed by MAPMetric (pycocotools COCOeval) over the whole set rather than per image.
+COCO_METRICS = ("map", "f1_50")
 
 
 def _mask_instances_to_canvas(
@@ -91,14 +93,12 @@ def _compute_image_metrics(
 
     image_metrics = {}
     for metric_name in metrics:
-        if metric_name == "map":
-            continue
-        elif metric_name in ("mean_iou", "f1_50") and is_mask_preds:
+        if metric_name in COCO_METRICS:
+            continue  # computed over the whole set by MAPMetric
+        elif metric_name == "mean_iou" and is_mask_preds:
             score = float("nan")  # not defined for mask predictions
         elif metric_name == "mean_iou":
             score = mean_iou(predictions, ground_truth)
-        elif metric_name == "f1_50":
-            score = f1(predictions, ground_truth, threshold=0.5)
         elif metric_name == "coverage":
             score = coverage(gt_ssu_map, pred_masks)
         elif metric_name == "overlap":
@@ -224,6 +224,7 @@ class BenchmarkRunner:
             model: Model instance to evaluate
             metrics: List of metric names (default: all)
             map_ignore_class: If True, collapse all classes to 'object' for mAP
+                and F1 (both use COCO matching, which is class-aware)
             batch_size: Number of images per GPU inference batch (default: 16)
 
         Returns:
@@ -297,7 +298,7 @@ class BenchmarkRunner:
         # --- Phases 2+3: Pipelined inference and metrics ---
         # Metric tasks for batch K are submitted immediately after inference completes,
         # so CPU metric computation overlaps with GPU inference for batch K+1.
-        map_metric = MAPMetric() if "map" in metrics else None
+        map_metric = MAPMetric() if any(m in metrics for m in COCO_METRICS) else None
 
         results = {
             "model": model.model_name,
@@ -307,7 +308,7 @@ class BenchmarkRunner:
             "per_image_results": [],
             "classes": {},
         }
-        metric_totals = {m: 0.0 for m in metrics if m != "map"}
+        metric_totals = {m: 0.0 for m in metrics if m not in COCO_METRICS}
 
         ordered_futures: List[Future] = []
         logger.info(
@@ -367,11 +368,16 @@ class BenchmarkRunner:
         if map_metric:
             logger.info("Computing global mAP...")
             map_scores = map_metric.compute()
-            results["metrics"]["map"] = map_scores["map"]
-            results["metrics"]["map_50"] = map_scores["map_50"]
-            results["metrics"]["map_75"] = map_scores["map_75"]
-            if "classes" in map_scores:
+            if "map" in metrics:
+                for key in ("map", "map_50", "map_75"):
+                    results["metrics"][key] = map_scores[key]
                 results["classes"] = map_scores["classes"]
+            if "f1_50" in metrics:
+                # Pooled TP/FP/FN over the set (micro average), not a mean of per-image F1.
+                for key in ("f1_50", "precision_50", "recall_50"):
+                    results["metrics"][key] = map_scores[key]
+                for img, score in zip(results["per_image_results"], map_scores["per_image_f1_50"]):
+                    img["metrics"]["f1_50"] = score
 
         return results
 
@@ -401,7 +407,7 @@ class BenchmarkRunner:
             print(f"  mAP@75         : {metrics['map_75']:.4f}")
             print("-" * 30)
 
-        for name in ["mean_iou", "f1_50", "coverage", "overlap", "trespass"]:
+        for name in ["mean_iou", "f1_50", "precision_50", "recall_50", "coverage", "overlap", "trespass"]:
             if name in metrics:
                 print(f"  {name.upper():15s}: {metrics[name]:.4f}")
 

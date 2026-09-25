@@ -121,46 +121,50 @@ def f1(
     predicted_regions: List[BBox], ground_truth_regions: List[BBox], threshold: float = 0.5
 ) -> float:
     """
-    Calculate F1 score at a given IoU threshold (default 0.50).
+    Calculate F1 score at a given IoU threshold (default 0.50) for one image.
 
-    Each ground truth box is matched to the best-IoU prediction. A match is a
-    true positive (TP) if IoU >= threshold. Unmatched GT boxes are false negatives
-    (FN); unmatched predictions are false positives (FP).
+    Matching follows COCO (``pycocotools.cocoeval``): predictions are taken in
+    descending ``confidence`` (input order when absent or tied), and each claims
+    the still-unmatched ground truth box with the highest IoU, provided that IoU
+    is at least ``threshold``. Matched predictions are true positives (TP),
+    unmatched predictions false positives (FP), and unmatched GT boxes false
+    negatives (FN). Classes are ignored; for class-aware or dataset-level F1
+    use :class:`cotescore.map_metric.MAPMetric`, which applies the same rule.
 
     Args:
-        predicted_regions: List of predicted bounding boxes.
+        predicted_regions: List of predicted bounding boxes, optionally with a
+            ``confidence`` key.
         ground_truth_regions: List of ground truth bounding boxes.
         threshold: IoU threshold for a match to count as a true positive (default 0.5).
 
     Returns:
-        F1 score in range [0.0, 1.0].
+        F1 score in range [0.0, 1.0]; 1.0 when both lists are empty.
     """
     if not ground_truth_regions and not predicted_regions:
         return 1.0
     if not ground_truth_regions or not predicted_regions:
         return 0.0
 
-    matched_preds = set()
-    tp = 0
-    for gt_box in ground_truth_regions:
-        best_iou, best_idx = 0.0, -1
-        for j, pred_box in enumerate(predicted_regions):
-            if j in matched_preds:
+    order = sorted(
+        range(len(predicted_regions)),
+        key=lambda j: -predicted_regions[j].get("confidence", 0.0),
+    )
+    matched_gt = set()
+    for j in order:
+        best_iou, best_idx = min(threshold, 1 - 1e-10), -1
+        for g, gt_box in enumerate(ground_truth_regions):
+            if g in matched_gt:
                 continue
-            score = iou(pred_box, gt_box)
-            if score > best_iou:
-                best_iou, best_idx = score, j
-        if best_iou >= threshold:
-            tp += 1
-            matched_preds.add(best_idx)
+            score = iou(predicted_regions[j], gt_box)
+            if score >= best_iou:
+                best_iou, best_idx = score, g
+        if best_idx >= 0:
+            matched_gt.add(best_idx)
 
-    fp = len(predicted_regions) - len(matched_preds)
+    tp = len(matched_gt)
+    fp = len(predicted_regions) - tp
     fn = len(ground_truth_regions) - tp
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    if precision + recall == 0:
-        return 0.0
-    return 2 * precision * recall / (precision + recall)
+    return 2 * tp / (2 * tp + fp + fn)
 
 
 def mean_iou(predicted_regions: List[BBox], ground_truth_regions: List[BBox]) -> float:

@@ -11,30 +11,49 @@ Notation (following the formulation):
   M^p,b_k        — binary union mask of all class-k predictions
   M^p_k          — count mask of class-k predictions (pixel = # preds covering it)
   A^P_k          = sum(M^p,b_k) — total pixel area of class-k predictions
-  A^O_k          = sum(M^S & (M^p_k − M^p,b_k)) — total redundant class-k pred area on GT
+  M^O            = [M^p > 1] — pixels covered by two or more predictions of any class
+  A^O_k          = sum(M^O & M^S * M^p_k) — class-k prediction area on overlapping GT
   A^S            = sum(M^S)
   i(j)           — SSU that owns prediction j (majority-pixel assignment)
   M^S_{l\\i(j)} — class-l GT mask with owner SSU i(j)'s pixels removed
 
 Interaction matrices (K×K, rows = pred class k, cols = GT class l):
 
-  C[k,l] = sum(M^S_l & M^p,b_k) / A^P_k
-    Coverage confusion matrix. "Of all class-k prediction area, what fraction
-    lands on class-l GT?" Diagonal = correct coverage; off-diagonal = misclassification.
+  C[k,l] = sum(M^S_l & M^p,b_k) / sum(M^S & M^p,b_k)
+    Coverage confusion matrix. "Of the class-k prediction area on GT, what
+    fraction lands on class-l GT?" Diagonal = correct coverage; off-diagonal =
+    misclassification. Background is excluded; it stays in coverage_precision.
 
-  O[k,l] = sum(M^S_l & (M^p_k − M^p,b_k)) / A^O_k
-    Overlap confusion matrix. "Of all class-k redundant prediction area on GT,
-    what fraction lands on class-l GT?" Asymmetric. Row is zero when A^O_k=0.
+  O[k,l] = sum_{j in k} sum(M^O & M^S_l & M^p_j) / A^O_k,
+  A^O_k  = sum_{j in k} sum(M^O & M^S & M^p_j),  M^O = [M^p > 1]
+    Overlap confusion matrix. "Of the overlapping GT area of the class-k
+    predictions, what fraction lands on class-l GT?" M^O counts predictions
+    of every class, so overlap between classes appears in both rows, but row
+    k is weighted only by class k's own predictions. Asymmetric. Row is zero
+    when A^O_k=0.
 
-  T[k,l] = sum_{j in k} sum(M^S_{l\\i(j)} & M^p_j) / A^P_k
-    Trespass confusion matrix. "Of all class-k prediction area, what fraction
-    trespasses on class-l GT (excluding the owner SSU)?"
-    Diagonal is non-zero: within-class trespass against other SSUs of same class.
+  T[k,l] = sum_{j in k} sum(M^S_{l\\i(j)} & M^p_j) / sum_{j in k} sum(M^S_{\\i(j)} & M^p_j)
+    Trespass confusion matrix. "Of the total trespass of the class-k
+    predictions, what fraction lands on class-l GT?" The owner SSU is excluded
+    in every column. Diagonal = trespass against other SSUs of the same class.
+
+  All three matrices are row-normalised: each non-empty row sums to 1.
 
 Class shares (K-vectors summing to 1):
   C_share[k]  fraction of total coverage attributable to class k
   O_share[k]  fraction of total overlap attributable to class k
   T_share[k]  fraction of total trespass attributable to class k
+
+  Coverage and overlap are attributed pro rata: a GT pixel under several
+  predictions is split between classes by the weight M^p_k / M^p, so a pixel
+  claimed by two classes is never counted twice.
+
+  C_share[k] = sum(M^S & M^p,b * M^p_k / M^p) / (C · A^S)
+  O_share[k] = sum(M^S * (M^p − M^p,b) * M^p_k / M^p) / (O · A^S)
+  T_share[k] = sum_{j in k} sum(M^S_{\\i(j)} & M^p_j) / (T · A^S)
+
+  Trespass needs no weighting: the scalar T is itself a sum over
+  predictions, each of which has exactly one class.
 """
 
 from __future__ import annotations
@@ -46,7 +65,6 @@ import numpy as np
 from cotescore._core import (
     _check_gt_map,
     _ms_mask,
-    _area_s,
     _owner_ssu_id,
 )
 from cotescore.types import ClassCOTeCounts, ClassCOTeResult, Label, MaskInstance
@@ -126,6 +144,45 @@ def _class_count_pred_mask(
     return mp
 
 
+def _prorata_share_numers(
+    ms: np.ndarray,
+    class_mp: Dict[Label, np.ndarray],
+    mp_global: np.ndarray,
+    classes: List[Label],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-class coverage and overlap share numerators, attributed pro rata.
+
+    Each GT pixel's coverage (1 if any prediction) and redundancy
+    (M^p − M^p,b) is split between classes by the weight M^p_k / M^p — the
+    fraction of the predictions on that pixel belonging to class k. The
+    weights sum to 1 on every predicted pixel, so the class numerators sum
+    exactly to the global coverage and overlap areas, even where predictions
+    of different classes overlap.
+    """
+    ms_f = ms.astype(np.float64)
+    mp_f = mp_global.astype(np.float64)
+    inv_mp = np.divide(1.0, mp_f, out=np.zeros_like(mp_f), where=mp_f > 0)
+    cov_weight = ms_f * inv_mp                                   # M^S ⊙ M^p,b / M^p
+    ovl_weight = ms_f * np.maximum(mp_f - 1.0, 0.0) * inv_mp     # M^S ⊙ (M^p − M^p,b) / M^p
+
+    cov = np.zeros(len(classes), dtype=np.float64)
+    ovl = np.zeros(len(classes), dtype=np.float64)
+    for k, cls in enumerate(classes):
+        mp_k = class_mp[cls]
+        cov[k] = float(np.sum(cov_weight * mp_k))
+        ovl[k] = float(np.sum(ovl_weight * mp_k))
+    return cov, ovl
+
+
+def _row_normalise(numer: np.ndarray) -> np.ndarray:
+    """Divide each row by its sum, so every non-empty row sums to 1."""
+    totals = numer.sum(axis=1)
+    out = np.zeros_like(numer, dtype=np.float64)
+    nonzero = totals > 0
+    out[nonzero, :] = numer[nonzero, :] / totals[nonzero, None]
+    return out
+
+
 def _micro_prf1(
     tp: np.ndarray, pred_area: np.ndarray, gt_area: np.ndarray
 ) -> Tuple[float, float, float]:
@@ -156,12 +213,13 @@ def coverage_matrix(
 ) -> Tuple[np.ndarray, List[Label]]:
     """Compute the K×K coverage interaction matrix.
 
-    C[k, l] = sum(M^S_l & M^p,b_k) / A^P_k
+    C[k, l] = sum(M^S_l & M^p,b_k) / sum(M^S & M^p,b_k)
 
-    "Of all class-k prediction area, what fraction lands on class-l GT?"
-    Diagonal entries give correct within-class coverage fraction.
-    Off-diagonal entries indicate classification errors.
-    Row k is all-zero when class k has no predictions.
+    "Of the class-k prediction area on GT, what fraction lands on class-l GT?"
+    Rows sum to 1. Diagonal entries give correct within-class coverage;
+    off-diagonal entries indicate classification errors. Row k is all-zero
+    when no class-k prediction touches GT. Prediction area on the background
+    is excluded here; it is still in ``coverage_precision``.
 
     Args:
         gt_ssu_map: 2D integer array of SSU ids (0 = background).
@@ -172,30 +230,8 @@ def coverage_matrix(
         (matrix, classes) where matrix is K×K float64 and classes is the
         ordered list of class labels defining row/column meaning.
     """
-    gt_ssu_map = _check_gt_map(gt_ssu_map)
-    _validate_preds_have_labels(preds)
-
-    classes = sorted(set(ssu_to_class.values()))
-    K = len(classes)
-    cls_idx = {c: i for i, c in enumerate(classes)}
-
-    class_gt = _build_class_gt_masks(gt_ssu_map, ssu_to_class, classes)
-    pred_groups = _group_preds_by_class(preds)
-
-    C = np.zeros((K, K), dtype=np.float64)
-    for k_cls, k in cls_idx.items():
-        group = pred_groups.get(k_cls, [])
-        if not group:
-            continue
-        mp_k_b = _class_binary_pred_mask(group, gt_ssu_map.shape)
-        a_p_k = int(np.sum(mp_k_b))
-        if a_p_k == 0:
-            continue
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            C[k, l] = float(np.sum(ms_l & mp_k_b)) / a_p_k
-
-    return C, classes
+    result = cote_class(gt_ssu_map, ssu_to_class, preds)
+    return result.coverage_matrix, result.classes
 
 
 def overlap_matrix(
@@ -205,12 +241,15 @@ def overlap_matrix(
 ) -> Tuple[np.ndarray, List[Label]]:
     """Compute the K×K overlap interaction matrix.
 
-    O[k, l] = sum(M^S_l & (M^p_k − M^p,b_k)) / A^O_k
-    where A^O_k = sum(M^S & (M^p_k − M^p,b_k))
+    O[k, l] = sum_{j in k} sum(M^O & M^S_l & M^p_j) / A^O_k
+    where A^O_k = sum_{j in k} sum(M^O & M^S & M^p_j) and M^O = [M^p > 1]
+    marks pixels covered by two or more predictions of any class.
 
-    "Of all class-k redundant prediction area on GT, what fraction lands
-    on class-l GT?" The matrix is asymmetric. Row k is all-zero when class k
-    has no redundant predictions (A^O_k = 0).
+    "Of the overlapping GT area of the class-k predictions, what fraction
+    lands on class-l GT?" Row k depends only on class k's predictions and
+    on where overlap occurs, not on how many other-class predictions are
+    involved. Rows sum to 1; the matrix is asymmetric. Row k is all-zero
+    when no class-k prediction lies on overlapping GT (A^O_k = 0).
 
     Args:
         gt_ssu_map: 2D integer array of SSU ids (0 = background).
@@ -221,33 +260,8 @@ def overlap_matrix(
         (matrix, classes) where matrix is K×K float64 and classes is the
         ordered list of class labels defining row/column meaning.
     """
-    gt_ssu_map = _check_gt_map(gt_ssu_map)
-    _validate_preds_have_labels(preds)
-
-    ms = _ms_mask(gt_ssu_map)
-    classes = sorted(set(ssu_to_class.values()))
-    K = len(classes)
-    cls_idx = {c: i for i, c in enumerate(classes)}
-
-    class_gt = _build_class_gt_masks(gt_ssu_map, ssu_to_class, classes)
-    pred_groups = _group_preds_by_class(preds)
-
-    O = np.zeros((K, K), dtype=np.float64)
-    for k_cls, k in cls_idx.items():
-        group = pred_groups.get(k_cls, [])
-        if not group:
-            continue
-        mp_k_b = _class_binary_pred_mask(group, gt_ssu_map.shape)
-        mp_k = _class_count_pred_mask(group, gt_ssu_map.shape)
-        mp_k_redundant = mp_k - mp_k_b.astype(np.int32)  # pixels covered by 2+ preds
-        a_o_k = int(np.sum(ms.astype(np.int32) * mp_k_redundant))
-        if a_o_k == 0:
-            continue
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            O[k, l] = float(np.sum(ms_l.astype(np.int32) * mp_k_redundant)) / a_o_k
-
-    return O, classes
+    result = cote_class(gt_ssu_map, ssu_to_class, preds)
+    return result.overlap_matrix, result.classes
 
 
 def trespass_matrix(
@@ -257,19 +271,13 @@ def trespass_matrix(
 ) -> Tuple[np.ndarray, List[Label]]:
     """Compute the K×K trespass interaction matrix.
 
-    T[k, l] = sum_{j in k} sum(M^S_{l\\i(j)} & M^p_j) / A^P_k
+    T[k, l] = sum_{j in k} sum(M^S_{l\\i(j)} & M^p_j) / sum_{j in k} sum(M^S_{\\i(j)} & M^p_j)
 
-    "Of all class-k prediction area, what fraction trespasses on class-l GT
-    (excluding the owner SSU)?"
-
-    For off-diagonal entries (k≠l): since SSUs are class-pure, the owner SSU
-    of a class-k prediction has no pixels in class-l GT, so M^S_{l\\i(j)} = M^S_l.
-
-    For diagonal entries (k=l): M^S_{k\\i(j)} = class-k GT minus owner SSU pixels.
-    This captures trespass against other class-k SSUs. Diagonal is non-zero
-    when a prediction covers GT belonging to a different SSU of the same class.
-
-    Row k is all-zero when class k has no predictions.
+    "Of the total trespass of the class-k predictions, what fraction lands on
+    class-l GT?" Each prediction's owner SSU i(j) is excluded in every
+    column, whatever its class. Rows sum to 1. The diagonal is trespass on
+    other SSUs of the same class. Row k is all-zero when no class-k
+    prediction trespasses.
 
     Args:
         gt_ssu_map: 2D integer array of SSU ids (0 = background).
@@ -280,45 +288,8 @@ def trespass_matrix(
         (matrix, classes) where matrix is K×K float64 and classes is the
         ordered list of class labels defining row/column meaning.
     """
-    gt_ssu_map = _check_gt_map(gt_ssu_map)
-    _validate_preds_have_labels(preds)
-
-    classes = sorted(set(ssu_to_class.values()))
-    K = len(classes)
-    cls_idx = {c: i for i, c in enumerate(classes)}
-
-    class_gt = _build_class_gt_masks(gt_ssu_map, ssu_to_class, classes)
-    pred_groups = _group_preds_by_class(preds)
-
-    T = np.zeros((K, K), dtype=np.float64)
-    for k_cls, k in cls_idx.items():
-        group = pred_groups.get(k_cls, [])
-        if not group:
-            continue
-        mp_k_b = _class_binary_pred_mask(group, gt_ssu_map.shape)
-        a_p_k = int(np.sum(mp_k_b))
-        if a_p_k == 0:
-            continue
-
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            if k == l:
-                # Diagonal: owner SSU excluded from class-k GT for each prediction
-                pixels = 0
-                for pm in group:
-                    owner = _owner_ssu_id(gt_ssu_map, pm)
-                    if owner is None:
-                        ms_eff = ms_l
-                    else:
-                        ms_eff = ms_l & (gt_ssu_map != owner)
-                    pixels += int(np.sum(pm & ms_eff))
-                T[k, l] = float(pixels) / a_p_k
-            else:
-                # Off-diagonal: owner is class-k, has no pixels in class-l GT
-                pixels = sum(int(np.sum(pm & ms_l)) for pm in group)
-                T[k, l] = float(pixels) / a_p_k
-
-    return T, classes
+    result = cote_class(gt_ssu_map, ssu_to_class, preds)
+    return result.trespass_matrix, result.classes
 
 
 # ---------------------------------------------------------------------------
@@ -331,13 +302,17 @@ def cote_class(
     ssu_to_class: Dict[int, Label],
     preds: Sequence[MaskInstance],
 ) -> ClassCOTeResult:
-    """Compute the full class-level COTe decomposition in a single pass.
+    """Compute the full class-level COTe decomposition for one image.
 
     Returns a :class:`~cot_score.types.ClassCOTeResult` containing all three
     K×K interaction matrices and all three K-vector share quantities.
 
     Share vectors each sum to 1.0 (when the corresponding global total is > 0).
     When a global total is zero, the corresponding share vector is all zeros.
+
+    Equivalent to :func:`class_confusion_counts` followed by
+    :func:`finalize_class_counts`, with the class list taken from
+    ``ssu_to_class``.
 
     Args:
         gt_ssu_map: 2D integer array of SSU ids (0 = background).
@@ -348,158 +323,9 @@ def cote_class(
         ClassCOTeResult with all matrices, share vectors, and the ordered
         ``classes`` list.
     """
-    gt_ssu_map = _check_gt_map(gt_ssu_map)
-    _validate_preds_have_labels(preds)
-
     classes = sorted(set(ssu_to_class.values()))
-    K = len(classes)
-    cls_idx = {c: i for i, c in enumerate(classes)}
-
-    ms = _ms_mask(gt_ssu_map)
-    a_s = _area_s(ms)
-
-    class_gt = _build_class_gt_masks(gt_ssu_map, ssu_to_class, classes)
-    pred_groups = _group_preds_by_class(preds)
-
-    # Pre-compute per-class binary union and count masks
-    class_mp_b: Dict[Label, np.ndarray] = {}
-    class_mp: Dict[Label, np.ndarray] = {}
-    for cls in classes:
-        group = pred_groups.get(cls, [])
-        class_mp_b[cls] = _class_binary_pred_mask(group, gt_ssu_map.shape)
-        class_mp[cls] = _class_count_pred_mask(group, gt_ssu_map.shape)
-
-    # Global binary union and count masks across all classes
-    mp_b_global = np.zeros(gt_ssu_map.shape, dtype=bool)
-    mp_global = np.zeros(gt_ssu_map.shape, dtype=np.int32)
-    for cls in classes:
-        mp_b_global |= class_mp_b[cls]
-        mp_global += class_mp[cls]
-
-    # --- Coverage matrix ---
-    # C[k,l] = sum(ms_l & mp_k_b) / A^P_k
-    C = np.zeros((K, K), dtype=np.float64)
-    a_p = np.zeros(K, dtype=np.float64)
-    for k_cls, k in cls_idx.items():
-        mp_k_b = class_mp_b[k_cls]
-        a_p_k = int(np.sum(mp_k_b))
-        a_p[k] = a_p_k
-        if a_p_k == 0:
-            continue
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            C[k, l] = float(np.sum(ms_l & mp_k_b)) / a_p_k
-
-    # --- Overlap matrix ---
-    # O[k,l] = sum(ms_l & (mp_k - mp_k_b)) / A^O_k
-    O = np.zeros((K, K), dtype=np.float64)
-    for k_cls, k in cls_idx.items():
-        mp_k_b = class_mp_b[k_cls]
-        mp_k = class_mp[k_cls]
-        mp_k_redundant = mp_k - mp_k_b.astype(np.int32)
-        a_o_k = int(np.sum(ms.astype(np.int32) * mp_k_redundant))
-        if a_o_k == 0:
-            continue
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            O[k, l] = float(np.sum(ms_l.astype(np.int32) * mp_k_redundant)) / a_o_k
-
-    # --- Trespass matrix ---
-    # T[k,l] = sum_{j in k} sum(ms_{l\i(j)} & mp_j) / A^P_k
-    T = np.zeros((K, K), dtype=np.float64)
-    for k_cls, k in cls_idx.items():
-        group = pred_groups.get(k_cls, [])
-        if not group:
-            continue
-        mp_k_b = class_mp_b[k_cls]
-        a_p_k = int(np.sum(mp_k_b))
-        if a_p_k == 0:
-            continue
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            if k == l:
-                pixels = 0
-                for pm in group:
-                    owner = _owner_ssu_id(gt_ssu_map, pm)
-                    ms_eff = ms_l & (gt_ssu_map != owner) if owner is not None else ms_l
-                    pixels += int(np.sum(pm & ms_eff))
-                T[k, l] = float(pixels) / a_p_k
-            else:
-                pixels = sum(int(np.sum(pm & ms_l)) for pm in group)
-                T[k, l] = float(pixels) / a_p_k
-
-    # --- Coverage share ---
-    # C_share[k] = sum(ms & mp_k_b) / sum(ms & mp_b_global)
-    global_cov_area = int(np.sum(ms & mp_b_global))
-    C_share = np.zeros(K, dtype=np.float64)
-    if global_cov_area > 0:
-        for cls, k in cls_idx.items():
-            C_share[k] = float(np.sum(ms & class_mp_b[cls])) / global_cov_area
-
-    # --- Overlap share ---
-    # O_share[k] = sum(ms & (mp_k - mp_k_b)) / sum(ms & (mp_global - mp_b_global))
-    mp_b_global_int = mp_b_global.astype(np.int32)
-    global_overlap_area = int(np.sum(ms.astype(np.int32) * (mp_global - mp_b_global_int)))
-    O_share = np.zeros(K, dtype=np.float64)
-    if global_overlap_area > 0:
-        for cls, k in cls_idx.items():
-            mp_k = class_mp[cls]
-            mp_k_b_int = class_mp_b[cls].astype(np.int32)
-            O_share[k] = (
-                float(np.sum(ms.astype(np.int32) * (mp_k - mp_k_b_int))) / global_overlap_area
-            )
-
-    # --- Trespass share ---
-    # T_share[k] = sum_{j in k} sum(ms_{excluding owner(j)} & mp_j) / (T_scalar * A_S)
-    T_share = np.zeros(K, dtype=np.float64)
-    if a_s > 0:
-        global_trespass_pixels = 0
-        per_class_trespass_pixels = {cls: 0 for cls in classes}
-        for cls, k in cls_idx.items():
-            group = pred_groups.get(cls, [])
-            for pm in group:
-                owner = _owner_ssu_id(gt_ssu_map, pm)
-                if owner is None:
-                    continue
-                trespass_pixels = int(np.sum(pm & ms & (gt_ssu_map != owner)))
-                global_trespass_pixels += trespass_pixels
-                per_class_trespass_pixels[cls] += trespass_pixels
-
-        if global_trespass_pixels > 0:
-            for cls, k in cls_idx.items():
-                T_share[k] = float(per_class_trespass_pixels[cls]) / global_trespass_pixels
-
-    # --- Coverage-derived precision / recall / F1 ---
-    # precision_k = TP_k / A^P_k (= diag(C), already normalised by predicted area)
-    # recall_k    = TP_k / A^S_k (GT-area-normalised — not available from C alone)
-    a_s_k = np.array([float(np.sum(class_gt[cls])) for cls in classes], dtype=np.float64)
-    coverage_precision = np.diag(C).copy()
-    tp = coverage_precision * a_p
-    coverage_recall = np.zeros(K, dtype=np.float64)
-    nonzero_s = a_s_k > 0
-    coverage_recall[nonzero_s] = tp[nonzero_s] / a_s_k[nonzero_s]
-    coverage_f1 = np.zeros(K, dtype=np.float64)
-    denom = coverage_precision + coverage_recall
-    nonzero_f1 = denom > 0
-    coverage_f1[nonzero_f1] = (
-        2 * coverage_precision[nonzero_f1] * coverage_recall[nonzero_f1] / denom[nonzero_f1]
-    )
-    micro_precision, micro_recall, micro_f1 = _micro_prf1(tp, a_p, a_s_k)
-
-    return ClassCOTeResult(
-        classes=classes,
-        coverage_matrix=C,
-        overlap_matrix=O,
-        trespass_matrix=T,
-        coverage_share=C_share,
-        overlap_share=O_share,
-        trespass_share=T_share,
-        coverage_precision=coverage_precision,
-        coverage_recall=coverage_recall,
-        coverage_f1=coverage_f1,
-        micro_precision=micro_precision,
-        micro_recall=micro_recall,
-        micro_f1=micro_f1,
+    return finalize_class_counts(
+        class_confusion_counts(gt_ssu_map, ssu_to_class, preds, classes)
     )
 
 
@@ -572,44 +398,34 @@ def class_confusion_counts(
     trespass_numer = np.zeros((K, K), dtype=np.float64)
     trespass_share_numer = np.zeros(K, dtype=np.float64)
 
+    m_o = mp_global > 1  # pixels covered by 2+ preds of any class
+
     for cls, k in cls_idx.items():
         mp_k_b = class_mp_b[cls]
-        mp_k = class_mp[cls]
+        mp_k_o = class_mp[cls] * m_o
         pred_area[k] = float(np.sum(mp_k_b))
         gt_area[k] = float(np.sum(class_gt[cls]))
-
-        mp_k_redundant = mp_k - mp_k_b.astype(np.int32)
-        overlap_area[k] = float(np.sum(ms.astype(np.int32) * mp_k_redundant))
+        overlap_area[k] = float(np.sum(mp_k_o * ms))
 
         for l_cls, l in cls_idx.items():
             ms_l = class_gt[l_cls]
             coverage_numer[k, l] = float(np.sum(ms_l & mp_k_b))
-            overlap_numer[k, l] = float(np.sum(ms_l.astype(np.int32) * mp_k_redundant))
+            overlap_numer[k, l] = float(np.sum(mp_k_o * ms_l))
 
-        group = pred_groups.get(cls, [])
-        for l_cls, l in cls_idx.items():
-            ms_l = class_gt[l_cls]
-            if k == l:
-                pixels = 0
-                for pm in group:
-                    owner = _owner_ssu_id(gt_ssu_map, pm)
-                    ms_eff = ms_l & (gt_ssu_map != owner) if owner is not None else ms_l
-                    pixels += int(np.sum(pm & ms_eff))
-                trespass_numer[k, l] = pixels
-            else:
-                trespass_numer[k, l] = sum(int(np.sum(pm & ms_l)) for pm in group)
-
-        # trespass_share_numer uses class-agnostic owner exclusion (matches
-        # cote_class's per_class_trespass_pixels), which differs from the
-        # row-sum of trespass_numer above whenever a prediction's
-        # majority-overlap SSU belongs to a different class than the
-        # prediction itself.
-        for pm in group:
+        # Each prediction's owner SSU is excluded in every column, whatever
+        # its class. A prediction with no owner has no GT pixels, so no trespass.
+        for pm in pred_groups.get(cls, []):
             owner = _owner_ssu_id(gt_ssu_map, pm)
             if owner is None:
                 continue
-            trespass_share_numer[k] += float(np.sum(pm & ms & (gt_ssu_map != owner)))
+            trespassed = pm & (gt_ssu_map != owner)
+            for l_cls, l in cls_idx.items():
+                trespass_numer[k, l] += float(np.sum(trespassed & class_gt[l_cls]))
+            trespass_share_numer[k] += float(np.sum(trespassed & ms))
 
+    coverage_share_numer, overlap_share_numer = _prorata_share_numers(
+        ms, class_mp, mp_global, classes
+    )
     global_coverage_area = int(np.sum(ms & mp_b_global))
     mp_b_global_int = mp_b_global.astype(np.int32)
     global_overlap_area = int(np.sum(ms.astype(np.int32) * (mp_global - mp_b_global_int)))
@@ -623,6 +439,8 @@ def class_confusion_counts(
         overlap_numer=overlap_numer,
         overlap_area=overlap_area,
         trespass_numer=trespass_numer,
+        coverage_share_numer=coverage_share_numer,
+        overlap_share_numer=overlap_share_numer,
         trespass_share_numer=trespass_share_numer,
         global_coverage_area=global_coverage_area,
         global_overlap_area=global_overlap_area,
@@ -657,6 +475,8 @@ def sum_class_counts(a: ClassCOTeCounts, b: ClassCOTeCounts) -> ClassCOTeCounts:
         overlap_numer=a.overlap_numer + b.overlap_numer,
         overlap_area=a.overlap_area + b.overlap_area,
         trespass_numer=a.trespass_numer + b.trespass_numer,
+        coverage_share_numer=a.coverage_share_numer + b.coverage_share_numer,
+        overlap_share_numer=a.overlap_share_numer + b.overlap_share_numer,
         trespass_share_numer=a.trespass_share_numer + b.trespass_share_numer,
         global_coverage_area=a.global_coverage_area + b.global_coverage_area,
         global_overlap_area=a.global_overlap_area + b.global_overlap_area,
@@ -686,33 +506,30 @@ def finalize_class_counts(counts: ClassCOTeCounts) -> ClassCOTeResult:
     pred_area = counts.pred_area
     gt_area = counts.gt_area
 
-    C = np.zeros((K, K), dtype=np.float64)
-    nonzero_p = pred_area > 0
-    C[nonzero_p, :] = counts.coverage_numer[nonzero_p, :] / pred_area[nonzero_p, None]
+    C = _row_normalise(counts.coverage_numer)
 
     O = np.zeros((K, K), dtype=np.float64)
     nonzero_o = counts.overlap_area > 0
     O[nonzero_o, :] = counts.overlap_numer[nonzero_o, :] / counts.overlap_area[nonzero_o, None]
 
-    T = np.zeros((K, K), dtype=np.float64)
-    T[nonzero_p, :] = counts.trespass_numer[nonzero_p, :] / pred_area[nonzero_p, None]
+    T = _row_normalise(counts.trespass_numer)
 
     C_share = np.zeros(K, dtype=np.float64)
     if counts.global_coverage_area > 0:
-        # Row-sum is valid here: GT classes partition M^S, so summing
-        # coverage_numer[k, :] over l recovers sum(ms & mp_k_b) exactly.
-        C_share = counts.coverage_numer.sum(axis=1) / counts.global_coverage_area
+        C_share = counts.coverage_share_numer / counts.global_coverage_area
 
     O_share = np.zeros(K, dtype=np.float64)
     if counts.global_overlap_area > 0:
-        O_share = counts.overlap_numer.sum(axis=1) / counts.global_overlap_area
+        O_share = counts.overlap_share_numer / counts.global_overlap_area
 
     T_share = np.zeros(K, dtype=np.float64)
     if counts.global_trespass_pixels > 0:
         T_share = counts.trespass_share_numer / counts.global_trespass_pixels
 
-    coverage_precision = np.diag(C).copy()
     tp = np.diag(counts.coverage_numer)
+    coverage_precision = np.zeros(K, dtype=np.float64)
+    nonzero_p = pred_area > 0
+    coverage_precision[nonzero_p] = tp[nonzero_p] / pred_area[nonzero_p]
     coverage_recall = np.zeros(K, dtype=np.float64)
     nonzero_s = gt_area > 0
     coverage_recall[nonzero_s] = tp[nonzero_s] / gt_area[nonzero_s]

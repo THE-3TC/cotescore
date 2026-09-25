@@ -110,7 +110,10 @@ class TestMAPMetricBBox:
         metric = MAPMetric()
         metric.update([], [_box(0, 0, 10, 10)])
         results = metric.compute()
-        assert results == {"map": 0.0, "map_50": 0.0, "map_75": 0.0, "classes": {"text": 0.0}}
+        assert results == {
+            "map": 0.0, "map_50": 0.0, "map_75": 0.0, "classes": {"text": 0.0},
+            "precision_50": -1.0, "recall_50": 0.0, "f1_50": 0.0, "per_image_f1_50": [0.0],
+        }
 
     def test_empty_ground_truth(self):
         metric = MAPMetric()
@@ -129,6 +132,73 @@ class TestMAPMetricBBox:
     def test_invalid_iou_type(self):
         with pytest.raises(ValueError):
             MAPMetric(iou_type="polygon")
+
+
+class TestMAPMetricF1:
+    def test_perfect_match(self):
+        metric = MAPMetric()
+        metric.update([_box(10, 10, 50, 50, conf=0.9)], [_box(10, 10, 50, 50)])
+        results = metric.compute()
+        assert results["f1_50"] == pytest.approx(1.0)
+        assert results["precision_50"] == pytest.approx(1.0)
+        assert results["recall_50"] == pytest.approx(1.0)
+
+    def test_duplicate_prediction_is_false_positive(self):
+        """Only the higher-confidence of two overlapping predictions claims the GT box."""
+        metric = MAPMetric()
+        metric.update([_box(10, 10, 50, 50, conf=0.9), _box(12, 12, 50, 50, conf=0.8)], [_box(10, 10, 50, 50)])
+        results = metric.compute()
+        assert results["precision_50"] == pytest.approx(0.5)
+        assert results["recall_50"] == pytest.approx(1.0)
+        assert results["f1_50"] == pytest.approx(2 / 3)
+
+    def test_class_mismatch_is_not_a_match(self):
+        metric = MAPMetric()
+        metric.update([_box(10, 10, 50, 50, "figure", 1.0)], [_box(10, 10, 50, 50, "text")])
+        assert metric.compute()["f1_50"] == pytest.approx(0.0)
+
+    def test_micro_average_over_images(self):
+        """TP/FP/FN are pooled over images, not averaged per image."""
+        metric = MAPMetric()
+        metric.update([_box(0, 0, 10, 10, conf=1.0)], [_box(0, 0, 10, 10)])  # TP
+        metric.update([_box(0, 0, 10, 10, conf=1.0)], [_box(50, 50, 10, 10)] * 3)  # FP + 3 FN
+        results = metric.compute()
+        assert results["f1_50"] == pytest.approx(2 * 1 / (2 * 1 + 1 + 3))
+        assert results["per_image_f1_50"] == pytest.approx([1.0, 0.0])
+
+    def test_predictions_beyond_max_dets_are_not_counted(self):
+        gt = [_box(0, 0, 10, 10)]
+        preds = [_box(0, 0, 10, 10, conf=1.0)] + [_box(100 + 20 * i, 0, 10, 10, conf=0.5) for i in range(5)]
+        metric = MAPMetric(max_dets=(1, 2, 3))
+        metric.update(preds, gt)
+        assert metric.compute()["precision_50"] == pytest.approx(1 / 3)
+
+    def test_empty_ground_truth(self):
+        metric = MAPMetric()
+        metric.update([_box(0, 0, 10, 10, conf=1.0)], [])
+        metric.update([], [])
+        results = metric.compute()
+        assert results["f1_50"] == pytest.approx(0.0)
+        assert results["recall_50"] == -1.0
+        assert results["per_image_f1_50"] == [0.0, 1.0]
+
+    def test_agrees_with_layout_f1(self):
+        """The per-image layout.f1 uses the same COCO matching rule."""
+        from cotescore.layout import f1
+
+        rng = np.random.default_rng(0)
+        metric = MAPMetric()
+        expected = []
+        for _ in range(30):
+            gt = [_box(*rng.uniform(0, 200, 2), *rng.uniform(10, 60, 2)) for _ in range(rng.integers(0, 12))]
+            preds = [
+                _box(*rng.uniform(0, 200, 2), *rng.uniform(10, 60, 2), conf=float(rng.uniform()))
+                for _ in range(rng.integers(0, 12))
+            ]
+            preds += [{**g, "x": g["x"] + rng.uniform(-5, 5), "confidence": float(rng.uniform())} for g in gt[::2]]
+            metric.update(preds, gt)
+            expected.append(f1(preds, gt))
+        assert metric.compute()["per_image_f1_50"] == pytest.approx(expected)
 
 
 class TestMAPMetricSegm:

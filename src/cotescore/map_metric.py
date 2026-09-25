@@ -3,7 +3,13 @@ COCO-style mean Average Precision (mAP) on top of pycocotools.
 
 :class:`MAPMetric` accumulates per-image predictions and ground truth, then
 runs ``pycocotools.cocoeval.COCOeval`` over the whole set. It reports the
-standard COCO numbers (AP@[.50:.05:.95], AP@.50, AP@.75) plus per-class AP.
+standard COCO numbers (AP@[.50:.05:.95], AP@.50, AP@.75), per-class AP, and
+precision / recall / F1 at IoU 0.50 taken from the same COCO matching.
+
+One deliberate departure from the COCO defaults: up to 500 predictions per
+image are scored rather than 100. Text-dense pages (newspapers, reports) often
+carry more than 100 regions, and the COCO cap would silently discard the
+lowest-confidence predictions on those pages and cap recall.
 
 Both box (``iou_type="bbox"``) and pixel (``iou_type="segm"``) matching are
 supported. In ``segm`` mode each annotation carries a boolean ``mask`` array
@@ -15,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import io
 import logging
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -33,8 +40,16 @@ class MAPMetric:
         iou_type: ``"bbox"`` (default) matches on axis-aligned boxes;
             ``"segm"`` matches on binary masks.
         max_dets: COCO ``maxDets`` thresholds. The last value caps the
-            number of predictions scored per image; the default raises the
-            COCO cap of 100 so dense pages are not silently truncated.
+            number of predictions scored per image and class (highest
+            confidence first). The default of 500 replaces COCO's standard
+            ``(1, 10, 100)`` so text-dense pages are not truncated; pass
+            ``(1, 10, 100)`` to reproduce stock COCO numbers.
+
+    F1 uses COCO's matching rule: within each image and class, predictions are
+    taken in descending confidence and each claims the unmatched GT box with the
+    highest IoU at or above 0.50. Matched predictions are TP, the rest FP, and
+    unmatched GT boxes FN. Only the top ``max_dets[-1]`` predictions per image
+    and class are counted, exactly as for mAP.
 
     Each ``update`` call is one image. Prediction dicts must contain
     ``class`` and ``confidence``; ground-truth dicts must contain ``class``.
@@ -148,23 +163,32 @@ class MAPMetric:
         Compute COCO mAP over everything accumulated so far.
 
         Returns:
-            ``{"map", "map_50", "map_75", "classes": {name: AP}}``.
+            ``{"map", "map_50", "map_75", "classes": {name: AP},
+            "precision_50", "recall_50", "f1_50", "per_image_f1_50"}``.
             ``map*`` are AP@[.50:.05:.95], AP@.50 and AP@.75 over all classes.
+            ``precision_50`` / ``recall_50`` / ``f1_50`` pool TP/FP/FN over
+            the whole set (micro average). ``per_image_f1_50`` lists F1 for
+            each ``update`` call in order; an image with no GT and no
+            predictions scores ``1.0``.
             A value of ``-1.0`` follows the COCO convention for "undefined"
             (no ground truth to score against). With no predictions every
             AP is ``0.0``.
         """
-        from pycocotools.coco import COCO
-        from pycocotools.cocoeval import COCOeval
-
         classes = sorted(self._label_map.items(), key=lambda kv: kv[1])
         if not self._gt_anns:
-            return {"map": _UNDEFINED, "map_50": _UNDEFINED, "map_75": _UNDEFINED,
-                    "classes": {name: _UNDEFINED for name, _ in classes}}
-        if not self._pred_anns:
+            out = {"map": _UNDEFINED, "map_50": _UNDEFINED, "map_75": _UNDEFINED,
+                   "classes": {name: _UNDEFINED for name, _ in classes}}
+        elif not self._pred_anns:
             gt_cats = {a["category_id"] for a in self._gt_anns}
-            return {"map": 0.0, "map_50": 0.0, "map_75": 0.0,
-                    "classes": {name: (0.0 if cid in gt_cats else _UNDEFINED) for name, cid in classes}}
+            out = {"map": 0.0, "map_50": 0.0, "map_75": 0.0,
+                   "classes": {name: (0.0 if cid in gt_cats else _UNDEFINED) for name, cid in classes}}
+        else:
+            return self._compute_coco(classes)
+        return {**out, **self._f1_summary(*self._unmatched_counts())}
+
+    def _compute_coco(self, classes) -> Dict[str, Any]:
+        from pycocotools.coco import COCO
+        from pycocotools.cocoeval import COCOeval
 
         coco_gt = COCO()
         coco_gt.dataset = {
@@ -200,6 +224,50 @@ class MAPMetric:
                 name: (_ap(precision[:, :, cat_index[cid]]) if cid in cat_index else _UNDEFINED)
                 for name, cid in classes
             },
+            **self._f1_summary(*self._matched_counts(ev, t50)),
+        }
+
+    # -------------------------------------------------------------------- F1
+    def _matched_counts(self, ev, t: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-image TP/FP/FN at IoU threshold index ``t`` from COCOeval's matches."""
+        n = len(self._images)
+        tp, fp, fn = np.zeros(n, int), np.zeros(n, int), np.zeros(n, int)
+        all_area = ev.params.areaRng[0]
+        for e in ev.evalImgs:
+            if e is None or e["aRng"] != all_area:
+                continue
+            i = e["image_id"] - 1
+            dt_ok = ~np.asarray(e["dtIgnore"][t], dtype=bool)
+            matched = np.asarray(e["dtMatches"][t]) > 0
+            n_tp = int(np.sum(matched & dt_ok))
+            tp[i] += n_tp
+            fp[i] += int(np.sum(~matched & dt_ok))
+            fn[i] += int(np.sum(~np.asarray(e["gtIgnore"], dtype=bool))) - n_tp
+        return tp, fp, fn
+
+    def _unmatched_counts(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-image TP/FP/FN when GT or predictions are absent, so nothing can match."""
+        n = len(self._images)
+        fp, fn = np.zeros(n, int), np.zeros(n, int)
+        for a in self._gt_anns:
+            fn[a["image_id"] - 1] += 1
+        per_image_class = Counter((a["image_id"], a["category_id"]) for a in self._pred_anns)
+        for (image_id, _), count in per_image_class.items():
+            fp[image_id - 1] += min(count, self.max_dets[-1])
+        return np.zeros(n, int), fp, fn
+
+    @staticmethod
+    def _f1_summary(tp: np.ndarray, fp: np.ndarray, fn: np.ndarray) -> Dict[str, Any]:
+        def _f1(tp, fp, fn):
+            denom = 2 * tp + fp + fn
+            return 2 * tp / denom if denom else 1.0
+
+        TP, FP, FN = int(tp.sum()), int(fp.sum()), int(fn.sum())
+        return {
+            "precision_50": TP / (TP + FP) if TP + FP else _UNDEFINED,
+            "recall_50": TP / (TP + FN) if TP + FN else _UNDEFINED,
+            "f1_50": _f1(TP, FP, FN) if TP + FP + FN else _UNDEFINED,
+            "per_image_f1_50": [float(_f1(*c)) for c in zip(tp, fp, fn)],
         }
 
     # ---------------------------------------------------------------- labels

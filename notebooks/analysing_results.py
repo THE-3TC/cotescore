@@ -1,12 +1,11 @@
 import marimo
 
-__generated_with = "0.20.4"
+__generated_with = "0.18.4"
 app = marimo.App(width="medium")
 
 
 @app.cell
 def _():
-
     return
 
 
@@ -33,7 +32,6 @@ def _():
         element_text,
         element_blank,
     )
-
     return Path, aes, geom_point, ggplot, json, mo, pd
 
 
@@ -125,7 +123,6 @@ def _(json, pd, ppdoc_results_folder, torch_results_folder):
         )
 
         return f"### LaTeX Table Output\n```latex\n{latex}\n```"
-
     return create_results_table, df_to_latex_md
 
 
@@ -254,7 +251,6 @@ def _(Path, json, pd):
                 records.append(record)
 
         return pd.DataFrame(records)
-
     return (load_results_to_dataframe,)
 
 
@@ -360,11 +356,9 @@ def _(NCSE_comparison_df, aes, geom_point, ggplot):
 
 @app.cell(hide_code=True)
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     # No ssu
-    """
-    )
+    """)
     return
 
 
