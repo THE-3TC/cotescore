@@ -1,7 +1,8 @@
 """Benchmark runner for evaluating models on the NCSE dataset."""
 
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
+import csv
 import json
 import logging
 import os
@@ -44,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 EVAL_MAX_DIM = 2000
 
+# Same columns as scripts/export_predictions.py, so either output can be analysed the same way.
+PREDICTION_CSV_COLUMNS = [
+    "filename", "image_path", "image_width", "image_height", "model", "source",
+    "x", "y", "width", "height", "class", "confidence", "ssu_id",
+]
+
 # Metrics computed by MAPMetric (pycocotools COCOeval) over the whole set rather than per image.
 COCO_METRICS = ("map", "f1_50")
 
@@ -60,6 +67,36 @@ def _mask_instances_to_canvas(
         pil_mask = pil_mask.resize((canvas_w, canvas_h), Image.NEAREST)
         masks.append(np.array(pil_mask) > 0)
     return masks
+
+
+def _prediction_rows(img_result: dict, model_label: str) -> List[dict]:
+    """GT and predicted boxes of one image as rows of PREDICTION_CSV_COLUMNS."""
+    base = {
+        "filename": img_result["filename"],
+        "image_path": img_result["image_path"],
+        "image_width": img_result["image_width"],
+        "image_height": img_result["image_height"],
+        "model": model_label,
+    }
+    rows = []
+    for source, boxes in (("gt", img_result["ground_truth"]), ("pred", img_result["predictions"])):
+        for b in boxes:
+            if not isinstance(b, dict):
+                continue  # mask predictions have no box to record
+            rows.append(
+                {
+                    **base,
+                    "source": source,
+                    "x": b["x"],
+                    "y": b["y"],
+                    "width": b["width"],
+                    "height": b["height"],
+                    "class": b["class"],
+                    "confidence": b.get("confidence", 1.0 if source == "gt" else None),
+                    "ssu_id": b.get("ssu_id") if source == "gt" else None,
+                }
+            )
+    return rows
 
 
 def _compute_image_metrics(
@@ -117,6 +154,9 @@ def _compute_image_metrics(
 
     return {
         "filename": sample["filename"],
+        "image_path": str(image_path),
+        "image_width": image_width,
+        "image_height": image_height,
         "predictions": predictions,
         "ground_truth": ground_truth,
         "image_metrics": image_metrics,
@@ -213,6 +253,8 @@ class BenchmarkRunner:
         *,
         map_ignore_class: bool = True,
         batch_size: int = 16,
+        predictions_csv: Optional[Path] = None,
+        model_label: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run evaluation for a model using specified metrics.
@@ -226,6 +268,10 @@ class BenchmarkRunner:
             map_ignore_class: If True, collapse all classes to 'object' for mAP
                 and F1 (both use COCO matching, which is class-aware)
             batch_size: Number of images per GPU inference batch (default: 16)
+            predictions_csv: If given, write every GT and predicted box to this
+                CSV (columns ``PREDICTION_CSV_COLUMNS``) so metrics can be
+                recomputed later without re-running inference.
+            model_label: Value for the CSV ``model`` column (default: model.model_name)
 
         Returns:
             Dictionary containing evaluation results
@@ -315,6 +361,15 @@ class BenchmarkRunner:
             f"Running pipelined inference + metrics (batch_size={batch_size}, workers={os.cpu_count()})..."
         )
 
+        csv_file = csv_writer = None
+        if predictions_csv is not None:
+            predictions_csv = Path(predictions_csv)
+            predictions_csv.parent.mkdir(parents=True, exist_ok=True)
+            csv_file = open(predictions_csv, "w", newline="")
+            csv_writer = csv.DictWriter(csv_file, fieldnames=PREDICTION_CSV_COLUMNS)
+            csv_writer.writeheader()
+        model_label = model_label or model.model_name
+
         with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
             for start in tqdm(range(0, n, batch_size), desc="Inference"):
                 chunk_paths = all_image_paths[start : start + batch_size]
@@ -352,6 +407,9 @@ class BenchmarkRunner:
                         gt = [{**g, "class": "object"} for g in gt]
                     map_metric.update(preds, gt)
 
+                if csv_writer:
+                    csv_writer.writerows(_prediction_rows(img_result, model_label))
+
                 for metric_name, score in img_result["image_metrics"].items():
                     if metric_name in metric_totals:
                         metric_totals[metric_name] += score
@@ -359,6 +417,10 @@ class BenchmarkRunner:
                 results["per_image_results"].append(
                     {"filename": img_result["filename"], "metrics": img_result["image_metrics"]}
                 )
+
+        if csv_file:
+            csv_file.close()
+            logger.info(f"Predictions saved to: {predictions_csv}")
 
         # Calculate average metrics
         for metric_name in metric_totals:

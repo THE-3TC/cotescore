@@ -143,10 +143,14 @@ def main():
         logger.info(f"{'='*60}")
 
         try:
-            results = runner.run_evaluation(model, map_ignore_class=(not args.map_class_aware))
-            runner.print_summary(results)
-
             safe_name = model_name.lower().replace(" ", "_").replace("-", "_")
+            results = runner.run_evaluation(
+                model,
+                map_ignore_class=(not args.map_class_aware),
+                predictions_csv=output_path / f"{safe_name}_predictions.csv",
+                model_label=model_name,
+            )
+            runner.print_summary(results)
             runner.save_results(results, filename=f"{safe_name}_results.json")
 
             all_results["models"][model_name] = results["metrics"]
@@ -167,6 +171,9 @@ def main():
         "map",
         "map_50",
         "map_75",
+        "f1_50",
+        "precision_50",
+        "recall_50",
         "mean_iou",
         "coverage",
         "overlap",
@@ -178,6 +185,9 @@ def main():
         "map": "mAP (COCO)",
         "map_50": "mAP@50",
         "map_75": "mAP@75",
+        "f1_50": "F1@50 (COCO)",
+        "precision_50": "Precision@50",
+        "recall_50": "Recall@50",
         "mean_iou": "Mean IoU",
         "coverage": "Coverage",
         "overlap": "Overlap",
