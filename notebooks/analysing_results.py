@@ -109,18 +109,15 @@ def _(json, pd, ppdoc_results_folder, torch_results_folder):
             "map": "high",
         }
 
-        df_fmt = df.copy().astype(float)
+        from latex_tables import bold_best_cols, latex_table
 
-        for col, direction in col_best.items():
-            if col in df_fmt.columns:
-                best_val = df_fmt[col].max() if direction == "high" else df_fmt[col].min()
-                df_fmt[col] = df_fmt[col].apply(
-                    lambda x: f"\\textbf{{{x:.2f}}}" if x == best_val else f"{x:.2f}"
-                )
-
-        latex = df_fmt.rename(columns=col_rename).to_latex(
-            index=True, escape=False, caption=caption, label=label
+        lower_cols = [col_rename[c] for c, d in col_best.items() if d == "low"]
+        df_fmt = bold_best_cols(
+            df.astype(float).rename(columns=col_rename).rename_axis("Model"),
+            lower_cols=lower_cols,
+            fmt="{:.2f}",
         )
+        latex = latex_table(df_fmt, caption=caption, label=label, echo=False)
 
         return f"### LaTeX Table Output\n```latex\n{latex}\n```"
     return create_results_table, df_to_latex_md

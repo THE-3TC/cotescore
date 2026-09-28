@@ -316,43 +316,13 @@ def _(
 
     _metrics_df = pd.DataFrame(_rows).set_index("Model")
 
-    # best direction per column: True = higher is better, False = lower is better
-    _best_max = {
-        "CoTE": True,
-        "Coverage": True,
-        "Overlap": False,
-        "Trespass": False,
-        "Excess": False,
-        "mIoU": True,
-        "F1": True,
-    }
+    import latex_tables as _lt
 
-    def _fmt(col, val):
-        best_fn = max if _best_max[col] else min
-        best_val = best_fn(_metrics_df[col])
-        s = f"{val:.2f}"
-        return f"\\textbf{{{s}}}" if val == best_val else s
-
-    _cols = list(_metrics_df.columns)
-    _col_header = " & ".join(_cols)
-    _rows_latex = []
-    for _model, _row in _metrics_df.iterrows():
-        _cells = " & ".join(_fmt(c, _row[c]) for c in _cols)
-        _rows_latex.append(f"{_model} & {_cells} \\\\")
-
-    _latex = (
-        "\\begin{table}\n"
-        f"\\caption{{Per-model metrics for \\texttt{{{_filename[:-4]}}}, bold is best in column}}\n"
-        f"\\label{{tab:model-metrics}}\n"
-        f"\\begin{{tabular}}{{l{'l' * len(_cols)}}}\n"
-        "\\toprule\n"
-        f" & {_col_header} \\\\\n"
-        "\\midrule\n" + "\n".join(_rows_latex) + "\n"
-        "\\bottomrule\n"
-        "\\end{tabular}\n"
-        "\\end{table}"
+    _lt.latex_table(
+        _lt.bold_best_cols(_metrics_df, lower_cols=["Overlap", "Trespass", "Excess"], fmt="{:.2f}"),
+        caption=f"Per-model metrics for \\texttt{{{_filename[:-4]}}}, bold is best in column",
+        label="tab:model-metrics",
     )
-    print(_latex)
     mo.as_html(_metrics_df.style.format("{:.2f}"))
     return
 

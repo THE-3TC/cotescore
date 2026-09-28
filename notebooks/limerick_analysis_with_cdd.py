@@ -434,22 +434,16 @@ def _(
         }
     )
 
-    # Generate LaTeX table
-    latex_inner = comparison_df.to_latex(index=False, escape=False)
-    # Add midrule before SSU based Coverage
-    latex_lines = latex_inner.split("\n")
-    for _i, _line in enumerate(latex_lines):
-        if "SSU based Coverage" in _line:
-            latex_lines.insert(_i, r"\midrule")
-            break
-    latex_inner = "\n".join(latex_lines)
+    import latex_tables as _lt
 
-    latex_table = f"""\\begin{{table}}
-    \\centering
-    {latex_inner}    \\caption{{Caption}}
-    \\end{{table}}"""
-
-    mo.md(f"### LaTeX Table Output\n```latex\n{latex_table}\n```")
+    _latex = _lt.latex_table(
+        comparison_df.set_index("Metric"),
+        caption="Detection metrics when line and paragraph ground truth are scored "
+        "against each other.",
+        label="tab:line_vs_para",
+        echo=False,
+    )
+    mo.md(f"### LaTeX Table Output\n```latex\n{_latex}\n```")
     return
 
 
@@ -518,6 +512,7 @@ def _(
     mean_iou,
     mo,
     np,
+    pd,
     pred_boxes,
 ):
 
@@ -545,26 +540,26 @@ def _(
     _recall = _tp / len(gt_boxes) if gt_boxes else 1.0
     f1 = 2 * _precision * _recall / (_precision + _recall) if (_precision + _recall) > 0 else 0.0
 
-    cote_example_latex_table = f"""\\begin{{table}}[h]
-    \\centering
-    \\caption{{Performance metrics across different figures.}}
-    \\label{{tab:cote_example}}
-    \\begin{{tabular}}{{l|cc}}
-    \\hline
-    \\textbf{{Metric}} & \\textbf{{Perfect}} & \\textbf{{Fig 2}} \\\\
-    \\hline
-    \\textbf{{COTe}} & 1 & {cote:.3f} \\\\
-    \\textbf{{Coverage}} & 1 & {C:.3f} \\\\
-    \\textbf{{Overlap}} & 0 & {O:.3f} \\\\
-    \\textbf{{Trespass}} & 0 & {T:.3f} \\\\
-    \\textbf{{Excess}} & 0 & {E:.3f} \\\\
-    \\textbf{{Mean IoU}} & 1 & {mIoU:.3f} \\\\
-    \\textbf{{F1 (IoU$\\geq$0.5)}} & 1 & {f1:.3f} \\\\
-    \\hline
-    \\end{{tabular}}
-    \\end{{table}}"""
+    import latex_tables as _lt
 
-    mo.md(f"### LaTeX Table Output\n```\n{cote_example_latex_table}\n```")
+    _example = pd.DataFrame(
+        {
+            "Perfect": ["1", "1", "0", "0", "0", "1", "1"],
+            "Fig 2": [f"{_v:.3f}" for _v in (cote, C, O, T, E, mIoU, f1)],
+        },
+        index=pd.Index(
+            ["COTe", "Coverage", "Overlap", "Trespass", "Excess", "Mean IoU",
+             r"F1 (IoU$\geq$0.5)"],
+            name="Metric",
+        ),
+    )
+    cote_example_latex_table = _lt.latex_table(
+        _example,
+        caption="Performance metrics across different figures.",
+        label="tab:cote_example",
+        echo=False,
+    )
+    mo.md(f"### LaTeX Table Output\n```latex\n{cote_example_latex_table}\n```")
     return
 
 
