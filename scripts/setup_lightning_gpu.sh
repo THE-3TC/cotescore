@@ -24,17 +24,25 @@
 #
 # Re-running is cheap: it skips work that's already done.
 
-# Sourced: run setup in a child bash so set -e / exit can't kill the caller's terminal.
-if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
-    if bash "${BASH_SOURCE[0]}"; then
+# Sourced (bash or zsh): run setup in a child bash so set -e / exit can't kill the caller's terminal.
+_setup_src=""
+if [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_setup_src="${(%):-%x}"'
+elif [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    _setup_src="${BASH_SOURCE[0]}"
+fi
+if [ -n "${_setup_src}" ]; then
+    if bash "${_setup_src}"; then
         # shellcheck disable=SC1091
-        source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv-gpu/bin/activate"
+        source "$(cd "$(dirname "${_setup_src}")/.." && pwd)/.venv-gpu/bin/activate"
         echo "venv activated in current shell."
     else
         echo "Setup failed (see errors above); venv not activated." >&2
     fi
+    unset _setup_src
     return
 fi
+unset _setup_src
 
 set -euo pipefail
 
