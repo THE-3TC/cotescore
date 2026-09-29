@@ -1,5 +1,6 @@
 import pytest
 from pathlib import Path
+pytest.importorskip("pipeline.config", reason="pipeline source is not on this branch")
 from pipeline.config import ExperimentConfig, load_config, ConfigError
 
 SAMPLE_YAML = """

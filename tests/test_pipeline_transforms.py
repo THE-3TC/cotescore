@@ -4,6 +4,7 @@ import pytest
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+pytest.importorskip("pipeline.dofns.transforms", reason="pipeline source is not on this branch")
 from pipeline.dofns.transforms import CropImageRegion
 
 

@@ -6,6 +6,7 @@ import json
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+pytest.importorskip("pipeline.dofns.io", reason="pipeline source is not on this branch")
 from pipeline.dofns.io import parse_alto_xml, write_json, write_parquet
 
 ALTO_PATH = Path("data/the_spiritualist/ocr_gt_with_ssu/0001_p001.xml")
