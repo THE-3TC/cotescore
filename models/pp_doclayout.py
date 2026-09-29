@@ -142,16 +142,8 @@ class PPDocLayout(LayoutModel):
             batch_paths = image_paths[start : start + batch_size]
             str_paths = [str(p) for p in batch_paths]
 
-            try:
-                output = self.model.predict(str_paths, batch_size=len(batch_paths))
-            except Exception as e:
-                logger.error(
-                    f"Error running PP-DocLayout batch prediction "
-                    f"({batch_paths[0]}..{batch_paths[-1]}): {e}"
-                )
-                all_predictions.extend([[] for _ in batch_paths])
-                continue
-
+            # Errors propagate so BenchmarkRunner retries the chunk image by image.
+            output = self.model.predict(str_paths, batch_size=len(batch_paths))
             for res in output:
                 raw = res.json if hasattr(res, "json") else {}
                 boxes = raw.get("res", {}).get("boxes", [])

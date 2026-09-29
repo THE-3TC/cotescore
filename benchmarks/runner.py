@@ -333,6 +333,8 @@ class BenchmarkRunner:
         dataset = self._dataset
         n = len(dataset)
         logger.info(f"Dataset loaded: {n} images")
+        if n == 0:
+            raise ValueError(f"No images loaded from {self.dataset_path}")
 
         if model.model is None:
             model.load()

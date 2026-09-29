@@ -52,6 +52,7 @@ benchmarks = [
     "marimo>=0.8.22",
     "requests>=2.32.4",
     "jinja2>=3.1.6", #For latex tables
+    "doclayout-yolo>=0.0.4",
     # PP-DocLayout-L — PaddlePaddle itself must be installed separately first:
     # pip install paddlepaddle==3.0.0 -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
     #"paddleocr>=2.9.0",
