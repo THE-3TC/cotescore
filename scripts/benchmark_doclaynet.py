@@ -90,6 +90,7 @@ def main():
     )
 
     all_results = {"timestamp": datetime.now().isoformat(), "models": {}}
+    failed_models = []
 
     models_to_run = []
 
@@ -157,6 +158,7 @@ def main():
 
         except Exception as e:
             logger.error(f"Failed to benchmark {model_name}: {e}")
+            failed_models.append(model_name)
             import traceback
 
             traceback.print_exc()
@@ -220,6 +222,10 @@ def main():
             row += f" | {score_str:<{col_w}}"
         print(row)
     print("=" * total_w)
+
+    if failed_models:
+        logger.error(f"These models failed and are missing from the results: {failed_models}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

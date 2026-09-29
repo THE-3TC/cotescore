@@ -113,6 +113,14 @@ class NCSEDataset:
 
             self.annotations_by_image[str(image_path)] = annotations
 
+        if not self.images:
+            raise ValueError(
+                f"No filenames in {csv_path} match a *.{self.image_ext} image in {images_dir} "
+                f"(e.g. CSV has {df['filename'].iloc[0]!r}, directory has "
+                f"{next(iter(actual_files), None)!r}). The CSV and images may be from "
+                "different dataset releases."
+            )
+
         self._loaded = True
 
     def _create_filename_mapping(self, csv_filenames: list, actual_filenames: list) -> dict:
