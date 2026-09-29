@@ -24,6 +24,18 @@
 #
 # Re-running is cheap: it skips work that's already done.
 
+# Sourced: run setup in a child bash so set -e / exit can't kill the caller's terminal.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+    if bash "${BASH_SOURCE[0]}"; then
+        # shellcheck disable=SC1091
+        source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.venv-gpu/bin/activate"
+        echo "venv activated in current shell."
+    else
+        echo "Setup failed (see errors above); venv not activated." >&2
+    fi
+    return
+fi
+
 set -euo pipefail
 
 # --- Configuration ----------------------------------------------------------
@@ -99,9 +111,7 @@ else
     exit 1
 fi
 
-# --- Install CUDA torch + the project + paddleocr ---------------------------
-# torch runs DocLayout-YOLO and Heron on the GPU. Install it before the project
-# so resolving ".[benchmarks]" keeps the cu130 build instead of pulling CPU torch.
+# --- Install CUDA torch first so ".[benchmarks]" keeps the cu130 build -------
 echo "[4/5] Installing CUDA torch, project (.[benchmarks]) and paddleocr..."
 uv pip install --python "${VPY}" \
     torch torchvision --index-url "${TORCH_CUDA_INDEX}"
@@ -126,11 +136,3 @@ echo "       --dataset ~/validation \\"
 echo "       --groundtruth ~/hiertext/gt/validation.jsonl \\"
 echo "       --device cuda --models yolo heron ppdoc-l"
 echo "=============================================================="
-
-# If this script was sourced (not executed), leave the venv active for the
-# caller's interactive shell.
-if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
-    # shellcheck disable=SC1091
-    source "${VENV_DIR}/bin/activate"
-    echo "venv activated in current shell."
-fi
